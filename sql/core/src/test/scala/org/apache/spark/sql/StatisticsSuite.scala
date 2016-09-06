@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql
 
-import org.apache.spark.sql.catalyst.plans.logical.{GlobalLimit, Join, LocalLimit}
+import org.apache.spark.sql.catalyst.plans.logical.{GlobalLimit, Join, LocalLimit, Statistics}
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types._
@@ -77,14 +77,14 @@ class StatisticsSuite extends QueryTest with SharedSQLContext {
   }
 
   test("test table-level statistics for data source table created in InMemoryCatalog") {
-    def checkTableStats(tableName: String, expectedRowCount: Option[BigInt]): Unit = {
+    def actualTableStats(tableName: String): Option[Statistics] = {
       val df = sql(s"SELECT * FROM $tableName")
-      val relations = df.queryExecution.analyzed.collect { case rel: LogicalRelation =>
+      val statsSeq = df.queryExecution.analyzed.collect { case rel: LogicalRelation =>
         assert(rel.catalogTable.isDefined)
-        assert(rel.catalogTable.get.stats.flatMap(_.rowCount) === expectedRowCount)
-        rel
+        rel.catalogTable.get.stats
       }
-      assert(relations.size === 1)
+      assert(statsSeq.length === 1)
+      statsSeq.head
     }
 
     val tableName = "tbl"
@@ -94,11 +94,18 @@ class StatisticsSuite extends QueryTest with SharedSQLContext {
 
       // noscan won't count the number of rows
       sql(s"ANALYZE TABLE $tableName COMPUTE STATISTICS noscan")
-      checkTableStats(tableName, expectedRowCount = None)
+      var actualStats = actualTableStats(tableName)
+      assert(actualStats.isDefined)
+      assert(actualStats.get.sizeInBytes > 0)
+      assert(actualStats.get.rowCount.isEmpty)
 
+      val tableSize = actualStats.get.sizeInBytes
       // without noscan, we count the number of rows
       sql(s"ANALYZE TABLE $tableName COMPUTE STATISTICS")
-      checkTableStats(tableName, expectedRowCount = Some(2))
+      actualStats = actualTableStats(tableName)
+      assert(actualStats.isDefined)
+      assert(actualStats.get.sizeInBytes === tableSize)
+      assert(actualStats.get.rowCount === Some(2))
     }
   }
 }
