@@ -23,8 +23,10 @@ import scala.collection.mutable
 
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.aggregate.HyperLogLogPlusPlus.HLLPPDigest
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, SpecificInternalRow}
-import org.apache.spark.sql.types.{DataType, IntegerType}
+import org.apache.spark.sql.catalyst.util.HyperLogLogPlusPlusAlgo
+import org.apache.spark.sql.types.{DataType, IntegerType, ObjectType}
 
 class HyperLogLogPlusPlusSuite extends SparkFunSuite {
 
@@ -47,7 +49,8 @@ class HyperLogLogPlusPlusSuite extends SparkFunSuite {
   def evaluateEstimate(hll: HyperLogLogPlusPlus, buffer: InternalRow, cardinality: Int): Unit = {
     val estimate = hll.eval(buffer).asInstanceOf[Long].toDouble
     val error = math.abs((estimate / cardinality.toDouble) - 1.0d)
-    assert(error < hll.trueRsd * 3.0d, "Error should be within 3 std. errors.")
+    assert(error < HyperLogLogPlusPlusAlgo.trueRsd(hll.relativeSD) * 3.0d,
+      "Error should be within 3 std. errors.")
   }
 
   test("add nulls") {
@@ -76,7 +79,8 @@ class HyperLogLogPlusPlusSuite extends SparkFunSuite {
         val estimate = hll.eval(buffer).asInstanceOf[Long].toDouble
         val cardinality = c(n)
         val error = math.abs((estimate / cardinality.toDouble) - 1.0d)
-        assert(error < hll.trueRsd * 3.0d, "Error should be within 3 std. errors.")
+        assert(error < HyperLogLogPlusPlusAlgo.trueRsd(hll.relativeSD) * 3.0d,
+          "Error should be within 3 std. errors.")
     }
   }
 
@@ -132,6 +136,8 @@ class HyperLogLogPlusPlusSuite extends SparkFunSuite {
       i += 1
     }
 
+    // Need to serialize the input buffer first.
+    hll.serializeAggregateBufferInPlace(buffer1b)
     // Merge the lower and upper halves.
     hll.merge(buffer1a, buffer1b)
 
@@ -144,6 +150,14 @@ class HyperLogLogPlusPlusSuite extends SparkFunSuite {
     }
 
     // Check if the buffers are equal.
-    assert(buffer2 == buffer1a, "Buffers should be equal")
+    assert(hll.eval(buffer1a) == hll.eval(buffer2), "Cardinality should be equal")
+
+    def getBufferObject(buffer: InternalRow): HLLPPDigest = {
+      buffer.get(0, ObjectType(classOf[AnyRef])).asInstanceOf[HLLPPDigest]
+    }
+    val hllppWords1 = getBufferObject(buffer1a).hllpp.words
+    val hllppWords2 = getBufferObject(buffer2).hllpp.words
+    assert(hllppWords1.sameElements(hllppWords2), "Words in HyperLogLogPlusPlusAlgo should be " +
+      "equal")
   }
 }
