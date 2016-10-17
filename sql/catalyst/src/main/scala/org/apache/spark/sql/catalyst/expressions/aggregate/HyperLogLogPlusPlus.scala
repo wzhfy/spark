@@ -17,14 +17,9 @@
 
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
-import java.nio.ByteBuffer
-
-import com.google.common.primitives.{Doubles, Ints, Longs}
-
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.aggregate.HyperLogLogPlusPlus.HLLPPDigest
 import org.apache.spark.sql.catalyst.util.HyperLogLogPlusPlusAlgo
 import org.apache.spark.sql.types._
 
@@ -59,7 +54,7 @@ case class HyperLogLogPlusPlus(
     relativeSD: Double = 0.05,
     mutableAggBufferOffset: Int = 0,
     inputAggBufferOffset: Int = 0)
-  extends TypedImperativeAggregate[HLLPPDigest] {
+  extends TypedImperativeAggregate[HyperLogLogPlusPlusAlgo] {
 
   def this(child: Expression) = {
     this(child = child, relativeSD = 0.05, mutableAggBufferOffset = 0, inputAggBufferOffset = 0)
@@ -89,68 +84,34 @@ case class HyperLogLogPlusPlus(
 
   override def inputTypes: Seq[AbstractDataType] = Seq(AnyDataType)
 
-  override def createAggregationBuffer(): HLLPPDigest = {
-    new HLLPPDigest(new HyperLogLogPlusPlusAlgo(relativeSD))
+  override def createAggregationBuffer(): HyperLogLogPlusPlusAlgo = {
+    new HyperLogLogPlusPlusAlgo(relativeSD)
   }
 
-  override def update(buffer: HLLPPDigest, input: InternalRow): Unit = {
+  override def update(buffer: HyperLogLogPlusPlusAlgo, input: InternalRow): Unit = {
     val v = child.eval(input)
     if (v != null) {
-      buffer.hllpp.insert(v, child.dataType)
+      buffer.insert(v, child.dataType)
     }
   }
 
-  override def merge(buffer: HLLPPDigest, input: HLLPPDigest): Unit = {
-    buffer.hllpp.merge(input.hllpp)
+  override def merge(buffer: HyperLogLogPlusPlusAlgo, input: HyperLogLogPlusPlusAlgo): Unit = {
+    buffer.merge(input)
   }
 
-  override def eval(buffer: HLLPPDigest): Any = buffer.hllpp.query
+  override def eval(buffer: HyperLogLogPlusPlusAlgo): Any = buffer.query
 
-  override def serialize(buffer: HLLPPDigest): Array[Byte] = {
-    HyperLogLogPlusPlus.serializer.serialize(buffer)
+  override def serialize(buffer: HyperLogLogPlusPlusAlgo): Array[Byte] = {
+    HyperLogLogPlusPlusAlgo.serialize(buffer)
   }
 
-  override def deserialize(storageFormat: Array[Byte]): HLLPPDigest = {
-    HyperLogLogPlusPlus.serializer.deserialize(storageFormat)
+  override def deserialize(storageFormat: Array[Byte]): HyperLogLogPlusPlusAlgo = {
+    HyperLogLogPlusPlusAlgo.deserialize(storageFormat)
   }
 }
 
 object HyperLogLogPlusPlus {
-
-  case class HLLPPDigest(hllpp: HyperLogLogPlusPlusAlgo)
-
-  class HLLPPDigestSerializer {
-
-    private final def length(hllpp: HyperLogLogPlusPlusAlgo): Int = {
-      // hllpp.relativeSD, length of hllpp.words, hllpp.words
-      Doubles.BYTES + Ints.BYTES + hllpp.words.length * Longs.BYTES
-    }
-
-    final def serialize(obj: HLLPPDigest): Array[Byte] = {
-      val buffer = ByteBuffer.wrap(new Array(length(obj.hllpp)))
-      buffer.putDouble(obj.hllpp.relativeSD)
-      buffer.putInt(obj.hllpp.words.length)
-      obj.hllpp.words.foreach(buffer.putLong)
-      buffer.array()
-    }
-
-    final def deserialize(bytes: Array[Byte]): HLLPPDigest = {
-      val buffer = ByteBuffer.wrap(bytes)
-      val relativeSD = buffer.getDouble
-      val wordsLength = buffer.getInt
-      val words = new Array[Long](wordsLength)
-      var i = 0
-      while (i < wordsLength) {
-        words(i) = buffer.getLong
-        i += 1
-      }
-      new HLLPPDigest(new HyperLogLogPlusPlusAlgo(relativeSD, words))
-    }
-  }
-
-  val serializer: HLLPPDigestSerializer = new HLLPPDigestSerializer
-
-  private def validateDoubleLiteral(exp: Expression): Double = exp match {
+  def validateDoubleLiteral(exp: Expression): Double = exp match {
     case Literal(d: Double, DoubleType) => d
     case Literal(dec: Decimal, _) => dec.toDouble
     case _ =>

@@ -23,7 +23,6 @@ import scala.collection.mutable
 
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.aggregate.HyperLogLogPlusPlus.HLLPPDigest
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, SpecificInternalRow}
 import org.apache.spark.sql.catalyst.util.HyperLogLogPlusPlusAlgo
 import org.apache.spark.sql.types.{DataType, IntegerType, ObjectType}
@@ -152,11 +151,11 @@ class HyperLogLogPlusPlusSuite extends SparkFunSuite {
     // Check if the buffers are equal.
     assert(hll.eval(buffer1a) == hll.eval(buffer2), "Cardinality should be equal")
 
-    def getBufferObject(buffer: InternalRow): HLLPPDigest = {
-      buffer.get(0, ObjectType(classOf[AnyRef])).asInstanceOf[HLLPPDigest]
+    def getBufferObject(buffer: InternalRow): HyperLogLogPlusPlusAlgo = {
+      buffer.get(0, ObjectType(classOf[AnyRef])).asInstanceOf[HyperLogLogPlusPlusAlgo]
     }
-    val hllppWords1 = getBufferObject(buffer1a).hllpp.words
-    val hllppWords2 = getBufferObject(buffer2).hllpp.words
+    val hllppWords1 = getBufferObject(buffer1a).words
+    val hllppWords2 = getBufferObject(buffer2).words
     assert(hllppWords1.sameElements(hllppWords2), "Words in HyperLogLogPlusPlusAlgo should be " +
       "equal")
   }

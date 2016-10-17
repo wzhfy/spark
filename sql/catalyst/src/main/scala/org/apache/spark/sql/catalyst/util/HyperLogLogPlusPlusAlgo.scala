@@ -18,7 +18,10 @@
 package org.apache.spark.sql.catalyst.util
 
 import java.lang.{Long => JLong}
+import java.nio.ByteBuffer
 import java.util
+
+import com.google.common.primitives.{Doubles, Ints, Longs}
 
 import org.apache.spark.sql.catalyst.expressions.XxHash64Function
 import org.apache.spark.sql.types._
@@ -263,6 +266,36 @@ class HyperLogLogPlusPlusAlgo(
  */
 // scalastyle:on
 object HyperLogLogPlusPlusAlgo {
+
+  final def length(hllpp: HyperLogLogPlusPlusAlgo): Int = {
+    // hllpp.relativeSD, length of hllpp.words, hllpp.words
+    Doubles.BYTES + Ints.BYTES + hllpp.words.length * Longs.BYTES
+  }
+
+  final def serialize(obj: HyperLogLogPlusPlusAlgo): Array[Byte] = {
+    val buffer = ByteBuffer.wrap(new Array(length(obj)))
+    buffer.putDouble(obj.relativeSD)
+    buffer.putInt(obj.words.length)
+    obj.words.foreach(buffer.putLong)
+    buffer.array()
+  }
+
+  final def deserialize(bytes: Array[Byte]): HyperLogLogPlusPlusAlgo = {
+    val buffer = ByteBuffer.wrap(bytes)
+    deserialize(buffer)
+  }
+
+  final def deserialize(byteBuffer: ByteBuffer): HyperLogLogPlusPlusAlgo = {
+    val relativeSD = byteBuffer.getDouble
+    val wordsLength = byteBuffer.getInt
+    val words = new Array[Long](wordsLength)
+    var i = 0
+    while (i < wordsLength) {
+      words(i) = byteBuffer.getLong
+      i += 1
+    }
+    new HyperLogLogPlusPlusAlgo(relativeSD, words)
+  }
 
   // Returns the `rsd` the HLLPP algorithm actually guarantees with this `relativeSD`.
   def trueRsd(relativeSD: Double): Double = new HyperLogLogPlusPlusAlgo(relativeSD).trueRsd
