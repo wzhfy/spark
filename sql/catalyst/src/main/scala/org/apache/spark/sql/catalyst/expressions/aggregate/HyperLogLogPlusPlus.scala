@@ -54,7 +54,7 @@ case class HyperLogLogPlusPlus(
     relativeSD: Double = 0.05,
     mutableAggBufferOffset: Int = 0,
     inputAggBufferOffset: Int = 0)
-  extends TypedImperativeAggregate[HyperLogLogPlusPlusAlgo] {
+  extends ImperativeAggregate {
 
   def this(child: Expression) = {
     this(child = child, relativeSD = 0.05, mutableAggBufferOffset = 0, inputAggBufferOffset = 0)
@@ -84,34 +84,58 @@ case class HyperLogLogPlusPlus(
 
   override def inputTypes: Seq[AbstractDataType] = Seq(AnyDataType)
 
-  override def createAggregationBuffer(): HyperLogLogPlusPlusAlgo = {
-    new HyperLogLogPlusPlusAlgo(relativeSD)
-  }
+  override def aggBufferSchema: StructType = StructType.fromAttributes(aggBufferAttributes)
 
-  override def update(buffer: HyperLogLogPlusPlusAlgo, input: InternalRow): Unit = {
-    val v = child.eval(input)
-    if (v != null) {
-      buffer.insert(v, child.dataType)
+  val hllppAlgo = new HyperLogLogPlusPlusAlgo(relativeSD)
+
+  /** Allocate enough words to store all registers. */
+  override val aggBufferAttributes: Seq[AttributeReference] =
+    Seq.tabulate(hllppAlgo.numWords) { i =>
+      AttributeReference(s"MS[$i]", LongType)()
+    }
+
+  // Note: although this simply copies aggBufferAttributes, this common code can not be placed
+  // in the superclass because that will lead to initialization ordering issues.
+  override val inputAggBufferAttributes: Seq[AttributeReference] =
+    aggBufferAttributes.map(_.newInstance())
+
+  /** Fill all words with zeros. */
+  override def initialize(buffer: InternalRow): Unit = {
+    var word = 0
+    while (word < hllppAlgo.numWords) {
+      buffer.setLong(mutableAggBufferOffset + word, 0)
+      word += 1
     }
   }
 
-  override def merge(buffer: HyperLogLogPlusPlusAlgo, input: HyperLogLogPlusPlusAlgo): Unit = {
-    buffer.merge(input)
+  /**
+   * Update the HLL++ buffer.
+   */
+  override def update(buffer: InternalRow, input: InternalRow): Unit = {
+    val v = child.eval(input)
+    if (v != null) {
+      hllppAlgo.update(buffer, mutableAggBufferOffset, v, child.dataType)
+    }
   }
 
-  override def eval(buffer: HyperLogLogPlusPlusAlgo): Any = buffer.query
-
-  override def serialize(buffer: HyperLogLogPlusPlusAlgo): Array[Byte] = {
-    HyperLogLogPlusPlusAlgo.serialize(buffer)
+  /**
+   * Merge the HLL++ buffers.
+   */
+  override def merge(buffer1: InternalRow, buffer2: InternalRow): Unit = {
+    hllppAlgo.merge(buffer1 = buffer1, buffer2 = buffer2,
+      offset1 = mutableAggBufferOffset, offset2 = inputAggBufferOffset)
   }
 
-  override def deserialize(storageFormat: Array[Byte]): HyperLogLogPlusPlusAlgo = {
-    HyperLogLogPlusPlusAlgo.deserialize(storageFormat)
+  /**
+   * Compute the HyperLogLog estimate.
+   */
+  override def eval(buffer: InternalRow): Any = {
+    hllppAlgo.query(buffer, mutableAggBufferOffset)
   }
 }
 
 object HyperLogLogPlusPlus {
-  def validateDoubleLiteral(exp: Expression): Double = exp match {
+  private def validateDoubleLiteral(exp: Expression): Double = exp match {
     case Literal(d: Double, DoubleType) => d
     case Literal(dec: Decimal, _) => dec.toDouble
     case _ =>

@@ -24,12 +24,11 @@ import java.util
 import com.google.common.primitives.{Doubles, Ints, Longs}
 
 import org.apache.spark.sql.catalyst.expressions.XxHash64Function
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types._
 
 // A helper class for HyperLogLogPlusPlus.
-class HyperLogLogPlusPlusAlgo(
-    val relativeSD: Double,
-    var words: Array[Long] = Array.empty) extends Serializable {
+class HyperLogLogPlusPlusAlgo(relativeSD: Double) extends Serializable {
   import HyperLogLogPlusPlusAlgo._
 
   /**
@@ -85,21 +84,16 @@ class HyperLogLogPlusPlusAlgo(
    * We only store whole registers per word in order to prevent overly complex bitwise operations.
    * In practice this means we only use 60 out of 64 bits.
    */
-  private[this] val numWords = m / REGISTERS_PER_WORD + 1
-
-  if (words.isEmpty) {
-    /** Fill all words with zeros. */
-    words = new Array[Long](numWords)
-  }
+  val numWords = m / REGISTERS_PER_WORD + 1
 
   /**
    * Update the HLL++ buffer.
    *
    * Variable names in the HLL++ paper match variable names in the code.
    */
-  def insert(v: Any, dataType: DataType): HyperLogLogPlusPlusAlgo = {
+  def update(buffer: InternalRow, bufferOffset: Int, value: Any, dataType: DataType): Unit = {
     // Create the hashed value 'x'.
-    val x = XxHash64Function.hash(v, dataType, 42L)
+    val x = XxHash64Function.hash(value, dataType, 42L)
 
     // Determine the index of the register we are going to use.
     val idx = (x >>> idxShift).toInt
@@ -109,7 +103,7 @@ class HyperLogLogPlusPlusAlgo(
 
     // Get the word containing the register we are interested in.
     val wordOffset = idx / REGISTERS_PER_WORD
-    val word = words(wordOffset)
+    val word = buffer.getLong(bufferOffset + wordOffset)
 
     // Extract the M[J] register value from the word.
     val shift = REGISTER_SIZE * (idx - (wordOffset * REGISTERS_PER_WORD))
@@ -118,21 +112,20 @@ class HyperLogLogPlusPlusAlgo(
 
     // Assign the maximum number of leading zeros to the register.
     if (pw > Midx) {
-      words.update(wordOffset, (word & ~mask) | (pw << shift))
+      buffer.setLong(bufferOffset + wordOffset, (word & ~mask) | (pw << shift))
     }
-    this
   }
 
   /**
    * Merge the HLL buffers by iterating through the registers in both buffers and select the
    * maximum number of leading zeros for each register.
    */
-  def merge(other: HyperLogLogPlusPlusAlgo): HyperLogLogPlusPlusAlgo = {
+  def merge(buffer1: InternalRow, buffer2: InternalRow, offset1: Int, offset2: Int): Unit = {
     var idx = 0
     var wordOffset = 0
     while (wordOffset < numWords) {
-      val word1 = words(wordOffset)
-      val word2 = other.words(wordOffset)
+      val word1 = buffer1.getLong(offset1 + wordOffset)
+      val word2 = buffer2.getLong(offset2 + wordOffset)
       var word = 0L
       var i = 0
       var mask = REGISTER_WORD_MASK
@@ -142,10 +135,9 @@ class HyperLogLogPlusPlusAlgo(
         i += 1
         idx += 1
       }
-      words.update(wordOffset, word)
+      buffer1.setLong(offset1 + wordOffset, word)
       wordOffset += 1
     }
-    this
   }
 
   /**
@@ -153,7 +145,7 @@ class HyperLogLogPlusPlusAlgo(
    * appendix. We currently use KNN interpolation to determine the bias (as suggested in the
    * paper).
    */
-  private def estimateBias(e: Double): Double = {
+  def estimateBias(e: Double): Double = {
     val estimates = RAW_ESTIMATE_DATA(p - 4)
     val numEstimates = estimates.length
 
@@ -198,14 +190,14 @@ class HyperLogLogPlusPlusAlgo(
    *
    * Variable names in the HLL++ paper match variable names in the code.
    */
-  def query: Long = {
+  def query(buffer: InternalRow, bufferOffset: Int): Long = {
     // Compute the inverse of indicator value 'z' and count the number of zeros 'V'.
     var zInverse = 0.0d
     var V = 0.0d
     var idx = 0
     var wordOffset = 0
     while (wordOffset < numWords) {
-      val word = words(wordOffset)
+      val word = buffer.getLong(bufferOffset + wordOffset)
       var i = 0
       var shift = 0
       while (idx < m && i < REGISTERS_PER_WORD) {
@@ -296,9 +288,6 @@ object HyperLogLogPlusPlusAlgo {
     }
     new HyperLogLogPlusPlusAlgo(relativeSD, words)
   }
-
-  // Returns the `rsd` the HLLPP algorithm actually guarantees with this `relativeSD`.
-  def trueRsd(relativeSD: Double): Double = new HyperLogLogPlusPlusAlgo(relativeSD).trueRsd
 
   /**
    * The size of a word used for storing registers: 64 Bits.
