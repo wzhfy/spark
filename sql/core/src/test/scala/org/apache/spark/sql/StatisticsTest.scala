@@ -115,7 +115,7 @@ object StatisticsTest {
     checkNdv(ndv = cs.ndv, expectedNdv = expectedCS.ndv, rsd = rsd)
   }
 
-  private def checkNdv(ndv: Long, expectedNdv: Long, rsd: Double): Unit = {
+  def checkNdv(ndv: Long, expectedNdv: Long, rsd: Double): Unit = {
     // ndv is an approximate value, so we make sure we have the value, and it should be
     // within 3*SD's of the given rsd.
     if (expectedNdv == 0) {

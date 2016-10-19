@@ -20,9 +20,8 @@ package org.apache.spark.sql.catalyst.expressions.aggregate
 import java.nio.ByteBuffer
 import java.util
 
-import com.google.common.primitives.{Ints, Longs}
+import com.google.common.primitives.{Doubles, Ints}
 
-import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{TypeCheckFailure, TypeCheckSuccess}
@@ -33,8 +32,9 @@ import org.apache.spark.sql.types._
 
 /**
  * The IntervalDistinctApprox function counts the approximate number of distinct values (ndv) in
- * intervals constructed from endpoints specified in `endpointsExpression`.
- * To count ndv's in these intervals, apply the HyperLogLogPlusPlus algorithm in each of them.
+ * intervals constructed from endpoints specified in `endpointsExpression`. The endpoints will be
+ * sorted into ascending order. To count ndv's in these intervals, apply the HyperLogLogPlusPlus
+ * algorithm in each of them.
  * @param child to estimate the ndv's of.
  * @param endpointsExpression to construct the intervals.
  * @param relativeSD The maximum estimation error allowed in the HyperLogLogPlusPlus algorithm.
@@ -76,7 +76,7 @@ case class IntervalDistinctApprox(
   }
 
   override def inputTypes: Seq[AbstractDataType] = {
-    Seq(child.dataType, TypeCollection(DoubleType, ArrayType))
+    Seq(TypeCollection(NumericType, TimestampType, DateType), ArrayType)
   }
 
   // Mark as lazy so that intervalExpression is not evaluated during tree transformation.
@@ -87,8 +87,6 @@ case class IntervalDistinctApprox(
         numericArray.map { x =>
           baseType.numeric.toDouble(x.asInstanceOf[baseType.InternalType])
         }
-      case other =>
-        throw new AnalysisException(s"Invalid data type ${other._1} for parameter endpoints")
     }
     util.Arrays.sort(doubleArray)
     doubleArray
@@ -98,11 +96,6 @@ case class IntervalDistinctApprox(
     val defaultCheck = super.checkInputDataTypes()
     if (defaultCheck.isFailure) {
       defaultCheck
-    } else if (!child.dataType.isInstanceOf[NumericType] &&
-      !child.dataType.isInstanceOf[DateType] && !child.dataType.isInstanceOf[TimestampType]) {
-      TypeCheckFailure("The interval_distinct_approx function only supports data type which is " +
-        "stored internally as Numeric, but the data type of ${child.prettyName} is " +
-        s"${child.dataType}")
     } else if (!endpointsExpression.foldable) {
       TypeCheckFailure("The intervals provided must be constant literals")
     } else if (endpoints.length < 2) {
@@ -113,12 +106,7 @@ case class IntervalDistinctApprox(
   }
 
   override def createAggregationBuffer(): HLLPPDispatcher = {
-    // N endpoints construct N-1 intervals, creating a HLLPP for each interval
-    val hllppArray = new Array[HyperLogLogPlusPlusAlgo](endpoints.length - 1)
-    for (i <- endpoints.indices) {
-      hllppArray(i) = new HyperLogLogPlusPlusAlgo(relativeSD)
-    }
-    new HLLPPDispatcher(endpoints, hllppArray)
+    HLLPPDispatcher(endpoints, relativeSD)
   }
 
   override def update(buffer: HLLPPDispatcher, inputRow: InternalRow): Unit = {
@@ -145,8 +133,7 @@ case class IntervalDistinctApprox(
 
   override def children: Seq[Expression] = Seq(child, endpointsExpression)
 
-  // Returns null for empty inputs
-  override def nullable: Boolean = true
+  override def nullable: Boolean = false
 
   override def dataType: DataType = ArrayType(LongType)
 
@@ -230,11 +217,22 @@ object IntervalDistinctApprox {
     }
   }
 
+  object HLLPPDispatcher {
+    def apply(endpoints: Array[Double], relativeSD: Double): HLLPPDispatcher = {
+      // N endpoints construct N-1 intervals, creating a HLLPP for each interval
+      val hllppArray = new Array[HyperLogLogPlusPlusAlgo](endpoints.length - 1)
+      for (i <- hllppArray.indices) {
+        hllppArray(i) = new HyperLogLogPlusPlusAlgo(relativeSD)
+      }
+      new HLLPPDispatcher(endpoints, hllppArray)
+    }
+  }
+
   class HLLPPDispatcherSerializer {
 
     private final def length(obj: HLLPPDispatcher): Int = {
       // obj.endpoints.length, obj.endpoints, obj.hllpps.length
-      var len = Ints.BYTES + obj.endpoints.length * Longs.BYTES + obj.hllpps.length
+      var len = Ints.BYTES + obj.endpoints.length * Doubles.BYTES + Ints.BYTES
       // obj.hllpps
       obj.hllpps.foreach(hllpp => len += HyperLogLogPlusPlusAlgo.length(hllpp))
       len
