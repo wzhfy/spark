@@ -17,16 +17,12 @@
 
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
-import java.nio.ByteBuffer
 import java.util
-
-import com.google.common.primitives.{Doubles, Ints}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{TypeCheckFailure, TypeCheckSuccess}
-import org.apache.spark.sql.catalyst.expressions.{Expression, ExpressionDescription}
-import org.apache.spark.sql.catalyst.expressions.aggregate.IntervalDistinctApprox.HLLPPDispatcher
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, ExpressionDescription}
 import org.apache.spark.sql.catalyst.util.{ArrayData, GenericArrayData, HyperLogLogPlusPlusAlgo}
 import org.apache.spark.sql.types._
 
@@ -55,7 +51,7 @@ case class IntervalDistinctApprox(
     endpointsExpression: Expression,
     relativeSD: Double = 0.05,
     mutableAggBufferOffset: Int = 0,
-    inputAggBufferOffset: Int = 0) extends TypedImperativeAggregate[HLLPPDispatcher] {
+    inputAggBufferOffset: Int = 0) extends ImperativeAggregate {
 
   def this(child: Expression, endpointsExpression: Expression) = {
     this(
@@ -105,55 +101,46 @@ case class IntervalDistinctApprox(
     }
   }
 
-  override def createAggregationBuffer(): HLLPPDispatcher = {
-    HLLPPDispatcher(endpoints, relativeSD)
+  // N endpoints construct N-1 intervals, creating a HLLPP for each interval
+  private lazy val hllppArray = {
+    val array = new Array[HyperLogLogPlusPlusAlgo](endpoints.length - 1)
+    for (i <- array.indices) {
+      array(i) = new HyperLogLogPlusPlusAlgo(relativeSD)
+    }
+    array
   }
 
-  override def update(buffer: HLLPPDispatcher, inputRow: InternalRow): Unit = {
-    val value = child.eval(inputRow)
-    // Ignore empty rows
-    if (value != null) {
-      buffer.insert(value, child.dataType)
+  private lazy val numWordsPerHllpp = hllppArray.head.numWords
+
+  private lazy val totalNumWords = numWordsPerHllpp * hllppArray.length
+
+  /** Allocate enough words to store all registers. */
+  override lazy val aggBufferAttributes: Seq[AttributeReference] = {
+    Seq.tabulate(totalNumWords) { i =>
+      AttributeReference(s"MS[$i]", LongType)()
     }
   }
 
-  override def merge(buffer: HLLPPDispatcher, other: HLLPPDispatcher): Unit = {
-    buffer.merge(other)
+  override def aggBufferSchema: StructType = StructType.fromAttributes(aggBufferAttributes)
+
+  // Note: although this simply copies aggBufferAttributes, this common code can not be placed
+  // in the superclass because that will lead to initialization ordering issues.
+  override lazy val inputAggBufferAttributes: Seq[AttributeReference] =
+    aggBufferAttributes.map(_.newInstance())
+
+  /** Fill all words with zeros. */
+  override def initialize(buffer: InternalRow): Unit = {
+    var word = 0
+    while (word < totalNumWords) {
+      buffer.setLong(mutableAggBufferOffset + word, 0)
+      word += 1
+    }
   }
 
-  override def eval(buffer: HLLPPDispatcher): Any = {
-    new GenericArrayData(buffer.getResults)
-  }
-
-  override def withNewMutableAggBufferOffset(newOffset: Int): IntervalDistinctApprox =
-    copy(mutableAggBufferOffset = newOffset)
-
-  override def withNewInputAggBufferOffset(newOffset: Int): IntervalDistinctApprox =
-    copy(inputAggBufferOffset = newOffset)
-
-  override def children: Seq[Expression] = Seq(child, endpointsExpression)
-
-  override def nullable: Boolean = false
-
-  override def dataType: DataType = ArrayType(LongType)
-
-  override def prettyName: String = "interval_distinct_approx"
-
-  override def serialize(obj: HLLPPDispatcher): Array[Byte] = {
-    IntervalDistinctApprox.serializer.serialize(obj)
-  }
-
-  override def deserialize(bytes: Array[Byte]): HLLPPDispatcher = {
-    IntervalDistinctApprox.serializer.deserialize(bytes)
-  }
-}
-
-object IntervalDistinctApprox {
-
-  case class HLLPPDispatcher(endpoints: Array[Double], hllpps: Array[HyperLogLogPlusPlusAlgo]) {
-
-    // Find which HyperLogLogPlusPlusAlgo should receive the given value.
-    def insert(value: Any, dataType: DataType): Unit = {
+  override def update(buffer: InternalRow, input: InternalRow): Unit = {
+    val value = child.eval(input)
+    // Ignore empty rows
+    if (value != null) {
       // convert the value into a double value for searching in the double array
       val doubleValue = dataType match {
         case n: NumericType =>
@@ -164,102 +151,93 @@ object IntervalDistinctApprox {
           value.asInstanceOf[Long].toDouble
       }
 
-      // endpoints are sorted already
+      // endpoints are sorted into ascending order already
       if (endpoints.head > doubleValue || endpoints.last < doubleValue) {
         // ignore if the value is out of the whole range
         return
       }
-      var index = util.Arrays.binarySearch(endpoints, doubleValue)
-      if (index >= 0) {
-        // The value is found.
-        if (index == 0) {
-          hllpps(0).insert(value, dataType)
-        } else {
-          // If the endpoints contains multiple elements with the specified value, there is no
-          // guarantee which one binarySearch will return. We remove this uncertainty by moving the
-          // index to the first position of these elements.
-          var first = index - 1
-          while(first >= 0 && endpoints(first) == value) {
-            first -= 1
-          }
-          index = first + 1
 
-          // send values in (endpoints(index-1), endpoints(index)] to hllpps(index-1)
-          hllpps(index - 1).insert(value, dataType)
-        }
+      val hllppIndex = findHllppIndex(endpoints, doubleValue)
+      val offset = mutableAggBufferOffset + hllppIndex * numWordsPerHllpp
+      hllppArray(hllppIndex).update(buffer, offset, value, child.dataType)
+    }
+  }
+
+  // Find which interval(HyperLogLogPlusPlusAlgo) should receive the given value.
+  def findHllppIndex(array: Array[Double], value: Double): Int = {
+    var index = util.Arrays.binarySearch(array, value)
+    if (index >= 0) {
+      // The value is found.
+      if (index == 0) {
+        0
       } else {
-        // The value is not found, binarySearch returns (-(<i>insertion point</i>) - 1).
-        // The <i>insertion point</i> is defined as the point at which the key would be inserted
-        // into the array: the index of the first element greater than the key.
-        val insertionPoint = - (index + 1)
-        hllpps(insertionPoint - 1).insert(value, dataType)
-      }
-    }
+        // If the endpoints contains multiple elements with the specified value, there is no
+        // guarantee which one binarySearch will return. We remove this uncertainty by moving the
+        // index to the first position of these elements.
+        var first = index - 1
+        while (first >= 0 && array(first) == value) {
+          first -= 1
+        }
+        index = first + 1
 
-    def merge(other: HLLPPDispatcher): Unit = {
-      assert(endpoints.sameElements(other.endpoints))
-      assert(hllpps.length == other.hllpps.length)
-      for (i <- hllpps.indices) {
-        hllpps(i).merge(other.hllpps(i))
+        if (index == 0) {
+          // reach the first endpoint
+          0
+        } else {
+          // send values in (endpoints(index-1), endpoints(index)] to hllpps(index-1)
+          index - 1
+        }
       }
-    }
-
-    def getResults: Array[Long] = {
-      val ndvArray = hllpps.map(_.query)
-      // If the endpoints contains multiple elements with the same value,
-      // we set ndv=1 for intervals between these elements.
-      // E.g. given four endpoints (1, 2, 2, 4) and input sequence (0.5, 2),
-      // the ndv's for the three intervals should be (2, 1, 0)
-      for (i <- 0 until endpoints.length - 2) {
-        if (endpoints(i) == endpoints(i + 1)) ndvArray(i) = 1
-      }
-      ndvArray
+    } else {
+      // The value is not found, binarySearch returns (-(<i>insertion point</i>) - 1).
+      // The <i>insertion point</i> is defined as the point at which the key would be inserted
+      // into the array: the index of the first element greater than the key.
+      val insertionPoint = - (index + 1)
+      if (insertionPoint == 0) 0 else insertionPoint - 1
     }
   }
 
-  object HLLPPDispatcher {
-    def apply(endpoints: Array[Double], relativeSD: Double): HLLPPDispatcher = {
-      // N endpoints construct N-1 intervals, creating a HLLPP for each interval
-      val hllppArray = new Array[HyperLogLogPlusPlusAlgo](endpoints.length - 1)
-      for (i <- hllppArray.indices) {
-        hllppArray(i) = new HyperLogLogPlusPlusAlgo(relativeSD)
-      }
-      new HLLPPDispatcher(endpoints, hllppArray)
+  override def merge(buffer1: InternalRow, buffer2: InternalRow): Unit = {
+    for (i <- hllppArray.indices) {
+      hllppArray(i).merge(
+        buffer1 = buffer1,
+        buffer2 = buffer2,
+        offset1 = mutableAggBufferOffset + i * numWordsPerHllpp,
+        offset2 = inputAggBufferOffset + i * numWordsPerHllpp)
     }
   }
 
-  class HLLPPDispatcherSerializer {
-
-    private final def length(obj: HLLPPDispatcher): Int = {
-      // obj.endpoints.length, obj.endpoints, obj.hllpps.length
-      var len = Ints.BYTES + obj.endpoints.length * Doubles.BYTES + Ints.BYTES
-      // obj.hllpps
-      obj.hllpps.foreach(hllpp => len += HyperLogLogPlusPlusAlgo.length(hllpp))
-      len
+  override def eval(buffer: InternalRow): Any = {
+    val ndvArray = hllppResults(buffer)
+    // If the endpoints contains multiple elements with the same value,
+    // we set ndv=1 for intervals between these elements.
+    // E.g. given four endpoints (1, 2, 2, 4) and input sequence (0.5, 2),
+    // the ndv's for the three intervals should be (2, 1, 0)
+    for (i <- ndvArray.indices) {
+      if (endpoints(i) == endpoints(i + 1)) ndvArray(i) = 1
     }
-
-    final def serialize(obj: HLLPPDispatcher): Array[Byte] = {
-      val buffer = ByteBuffer.wrap(new Array(length(obj)))
-      buffer.putInt(obj.endpoints.length)
-      obj.endpoints.foreach(buffer.putDouble)
-      buffer.putInt(obj.hllpps.length)
-      obj.hllpps.foreach(hllpp => buffer.put(HyperLogLogPlusPlusAlgo.serialize(hllpp)))
-      buffer.array()
-    }
-
-    final def deserialize(bytes: Array[Byte]): HLLPPDispatcher = {
-      val buffer = ByteBuffer.wrap(bytes)
-      val endpointsLength = buffer.getInt
-      val endpoints = new Array[Double](endpointsLength)
-      for (i <- 0 until endpointsLength) endpoints(i) = buffer.getDouble
-
-      val hllppNumber = buffer.getInt
-      val hllpps = new Array[HyperLogLogPlusPlusAlgo](hllppNumber)
-      for (i <- 0 until hllppNumber) hllpps(i) = HyperLogLogPlusPlusAlgo.deserialize(buffer)
-
-      new HLLPPDispatcher(endpoints, hllpps)
-    }
+    new GenericArrayData(ndvArray)
   }
 
-  val serializer: HLLPPDispatcherSerializer = new HLLPPDispatcherSerializer
+  def hllppResults(buffer: InternalRow): Array[Long] = {
+    val ndvArray = new Array[Long](hllppArray.length)
+    for (i <- ndvArray.indices) {
+      ndvArray(i) = hllppArray(i).query(buffer, mutableAggBufferOffset + i * numWordsPerHllpp)
+    }
+    ndvArray
+  }
+
+  override def withNewMutableAggBufferOffset(newMutableAggBufferOffset: Int): ImperativeAggregate =
+    copy(mutableAggBufferOffset = newMutableAggBufferOffset)
+
+  override def withNewInputAggBufferOffset(newInputAggBufferOffset: Int): ImperativeAggregate =
+    copy(inputAggBufferOffset = newInputAggBufferOffset)
+
+  override def children: Seq[Expression] = Seq(child, endpointsExpression)
+
+  override def nullable: Boolean = false
+
+  override def dataType: DataType = ArrayType(LongType)
+
+  override def prettyName: String = "interval_distinct_approx"
 }

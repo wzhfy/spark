@@ -20,151 +20,20 @@ package org.apache.spark.sql.catalyst.expressions.aggregate
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.TypeCheckFailure
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, BoundReference, CreateArray, GenericInternalRow, Literal}
-import org.apache.spark.sql.catalyst.expressions.aggregate.IntervalDistinctApprox.{HLLPPDispatcher, HLLPPDispatcherSerializer}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, BoundReference, CreateArray, Literal, SpecificInternalRow}
 import org.apache.spark.sql.catalyst.util.ArrayData
-import org.apache.spark.sql.types.{DoubleType, StringType}
+import org.apache.spark.sql.types.{DataType, DoubleType, IntegerType, StringType}
 
 class IntervalDistinctApproxSuite extends SparkFunSuite {
 
-  private val endpoints = Array[Double](0, 0.33, 0.6, 0.6, 0.6, 1.0)
-  private val data = Seq(0, 0.6, 0.3, 1, 0.6, 0.5, 0.6, 0.33)
-  private val expectedNdvs = Array[Long](3, 2, 1, 1, 1)
-
-  test("serialize and de-serialize") {
-    def assertEqualDispatcher(left: HLLPPDispatcher, right: HLLPPDispatcher): Unit = {
-      assert(left.endpoints.sameElements(right.endpoints))
-      assert(left.hllpps.length == right.hllpps.length)
-      for (i <- left.hllpps.indices) {
-        val h1 = left.hllpps(i)
-        val h2 = right.hllpps(i)
-        assert(h1.relativeSD == h2.relativeSD)
-        assert(h1.words.sameElements(h2.words))
-      }
+  test("fails analysis if parameters are invalid") {
+    def assertEqual[T](left: T, right: T): Unit = {
+      assert(left == right)
     }
 
-    val serializer = new HLLPPDispatcherSerializer
-    val relativeSD: Double = 0.01
-    // Check empty serialize and de-serialize
-    val buffer = HLLPPDispatcher(endpoints, relativeSD)
-    assertEqualDispatcher(buffer, serializer.deserialize(serializer.serialize(buffer)))
-
-    val random = new java.util.Random()
-    val data = (1 until 10000).map { _ =>
-      random.nextDouble()
-    }
-
-    data.foreach { value =>
-      buffer.insert(value, DoubleType)
-    }
-    assertEqualDispatcher(buffer, serializer.deserialize(serializer.serialize(buffer)))
-
-    val agg = new IntervalDistinctApprox(BoundReference(0, DoubleType, nullable = true),
-      CreateArray(endpoints.map(Literal(_))), Literal(relativeSD))
-    assertEqualDispatcher(agg.deserialize(agg.serialize(buffer)), buffer)
-  }
-
-  test("class HLLPPDispatcher, basic operations") {
-    Seq(0.01, 0.05, 0.1).foreach { relativeSD =>
-      val buffer = HLLPPDispatcher(endpoints, relativeSD)
-      data.grouped(4).foreach { group =>
-        val partialBuffer = HLLPPDispatcher(endpoints, relativeSD)
-        group.foreach(x => partialBuffer.insert(x, DoubleType))
-        buffer.merge(partialBuffer)
-      }
-      // before eval(), for intervals with the same endpoints, only the first interval counts the
-      // value
-      checkNDVs(
-        ndvs = buffer.hllpps.map(_.query),
-        expectedNdvs = Array(3, 2, 0, 0, 1),
-        rsd = relativeSD)
-      // after eval(), set the others to 1
-      checkNDVs(
-        ndvs = buffer.getResults,
-        expectedNdvs = expectedNdvs,
-        rsd = relativeSD)
-    }
-  }
-
-  test("class IntervalDistinctApprox, high level interface, update, merge, eval...") {
-    val childExpression = BoundReference(0, DoubleType, nullable = false)
-    val endpointsExpression = CreateArray(endpoints.reverse.map(Literal(_)))
-    val agg = new IntervalDistinctApprox(childExpression, endpointsExpression)
-    // check if the endpoints are sorted in an ascending order
-    assert(agg.createAggregationBuffer().endpoints.sameElements(endpoints))
-
-    assert(!agg.nullable)
-    val group1 = 0 until data.length / 2
-    val group1Buffer = agg.createAggregationBuffer()
-    group1.foreach { index =>
-      val input = InternalRow(data(index))
-      agg.update(group1Buffer, input)
-    }
-
-    val group2 = data.length / 2 until data.length
-    val group2Buffer = agg.createAggregationBuffer()
-    group2.foreach { index =>
-      val input = InternalRow(data(index))
-      agg.update(group2Buffer, input)
-    }
-
-    val mergeBuffer = agg.createAggregationBuffer()
-    agg.merge(mergeBuffer, group1Buffer)
-    agg.merge(mergeBuffer, group2Buffer)
-
-    val results = agg.eval(mergeBuffer).asInstanceOf[ArrayData]
-    checkNDVs(ndvs = results.toLongArray(), expectedNdvs = expectedNdvs, agg.relativeSD)
-  }
-
-  test("class IntervalDistinctApprox, low level interface, update, merge, eval...") {
-    val childExpression = BoundReference(0, DoubleType, nullable = true)
-    val endpointsExpression = CreateArray(endpoints.map(Literal(_)))
-    val inputAggregationBufferOffset = 1
-    val mutableAggregationBufferOffset = 2
-
-    // Phase one, partial mode aggregation
-    val agg = new IntervalDistinctApprox(childExpression, endpointsExpression)
-      .withNewInputAggBufferOffset(inputAggregationBufferOffset)
-      .withNewMutableAggBufferOffset(mutableAggregationBufferOffset)
-
-    val mutableAggBuffer = new GenericInternalRow(
-      new Array[Any](mutableAggregationBufferOffset + 1))
-    agg.initialize(mutableAggBuffer)
-    data.foreach(d => agg.update(mutableAggBuffer, InternalRow(d)))
-    agg.serializeAggregateBufferInPlace(mutableAggBuffer)
-
-    // Serialize the aggregation buffer
-    val serialized = mutableAggBuffer.getBinary(mutableAggregationBufferOffset)
-    val inputAggBuffer = new GenericInternalRow(Array[Any](null, serialized))
-
-    // Phase 2: final mode aggregation
-    // Re-initialize the aggregation buffer
-    agg.initialize(mutableAggBuffer)
-    agg.merge(mutableAggBuffer, inputAggBuffer)
-
-    val results = agg.eval(mutableAggBuffer).asInstanceOf[ArrayData]
-    checkNDVs(ndvs = results.toLongArray(), expectedNdvs = expectedNdvs, agg.relativeSD)
-  }
-
-  private def checkNDVs(ndvs: Array[Long], expectedNdvs: Array[Long], rsd: Double): Unit = {
-    assert(ndvs.length == expectedNdvs.length)
-    for (i <- ndvs.indices) {
-      val ndv = ndvs(i)
-      val expectedNdv = expectedNdvs(i)
-      if (expectedNdv == 0) {
-        assert(ndv == 0)
-      } else if (expectedNdv > 0) {
-        assert(ndv > 0)
-        val error = math.abs((ndv / expectedNdv.toDouble) - 1.0d)
-        assert(error <= rsd * 3.0d, "Error should be within 3 std. errors.")
-      }
-    }
-  }
-
-  test("class IntervalDistinctApprox, fails analysis if parameters are invalid") {
     val wrongColumn = new IntervalDistinctApprox(
       AttributeReference("a", StringType)(),
-      endpointsExpression = CreateArray(endpoints.map(Literal(_))))
+      endpointsExpression = CreateArray(Seq(1, 3, 5, 7, 9).map(Literal(_))))
     assert(
       wrongColumn.checkInputDataTypes() match {
         case TypeCheckFailure(msg)
@@ -196,7 +65,108 @@ class IntervalDistinctApproxSuite extends SparkFunSuite {
       TypeCheckFailure("The number of endpoints must be >= 2 to construct intervals"))
   }
 
-  private def assertEqual[T](left: T, right: T): Unit = {
-    assert(left == right)
+  /** Create an IntervalDistinctApprox instance and an input and output buffer. */
+  private def createEstimator(
+      endpoints: Array[Double],
+      rsd: Double = 0.05,
+      dt: DataType = IntegerType): (IntervalDistinctApprox, InternalRow, InternalRow) = {
+    val input = new SpecificInternalRow(Seq(dt))
+    val ida = IntervalDistinctApprox(
+      BoundReference(0, dt, nullable = true), CreateArray(endpoints.map(Literal(_))), rsd)
+    val buffer = createBuffer(ida)
+    (ida, input, buffer)
+  }
+
+  private def createBuffer(ida: IntervalDistinctApprox): InternalRow = {
+    val buffer = new SpecificInternalRow(ida.aggBufferAttributes.map(_.dataType))
+    ida.initialize(buffer)
+    buffer
+  }
+
+  test("merging IntervalDistinctApprox instances") {
+    val (ida, input, buffer1a) = createEstimator(Array[Double](0, 10, 2000, 345678, 1000000))
+    val buffer1b = createBuffer(ida)
+    val buffer2 = createBuffer(ida)
+
+    // Create the
+    // Add the lower half
+    var i = 0
+    while (i < 500000) {
+      input.setInt(0, i)
+      ida.update(buffer1a, input)
+      i += 1
+    }
+
+    // Add the upper half
+    i = 500000
+    while (i < 1000000) {
+      input.setInt(0, i)
+      ida.update(buffer1b, input)
+      i += 1
+    }
+
+    // Merge the lower and upper halves.
+    ida.merge(buffer1a, buffer1b)
+
+    // Create the other buffer in reverse
+    i = 999999
+    while (i >= 0) {
+      input.setInt(0, i)
+      ida.update(buffer2, input)
+      i -= 1
+    }
+
+    // Check if the buffers are equal.
+    assert(buffer2 == buffer1a, "Buffers should be equal")
+  }
+
+  test("basic operations: update, merge, eval...") {
+    val endpoints = Array[Double](0, 0.33, 0.6, 0.6, 0.6, 1.0)
+    val data: Seq[Double] = Seq(0, 0.6, 0.3, 1, 0.6, 0.5, 0.6, 0.33)
+    val expectedNdvs = Array[Long](3, 2, 1, 1, 1)
+
+    Seq(0.01, 0.05, 0.1).foreach { relativeSD =>
+      val ida = IntervalDistinctApprox(
+        BoundReference(0, DoubleType, nullable = true),
+        CreateArray(endpoints.map(Literal(_))),
+        relativeSD)
+      val buffer = createBuffer(ida)
+
+      data.grouped(4).foreach { group =>
+        val (partialIda, partialInput, partialBuffer) =
+          createEstimator(endpoints, relativeSD, DoubleType)
+        group.foreach { x =>
+          partialInput.setDouble(0, x)
+          partialIda.update(partialBuffer, partialInput)
+        }
+        ida.merge(buffer, partialBuffer)
+      }
+      // before eval(), for intervals with the same endpoints, only the first interval counts the
+      // value
+      checkNDVs(
+        ndvs = ida.hllppResults(buffer),
+        expectedNdvs = Array(3, 2, 0, 0, 1),
+        rsd = relativeSD)
+      // after eval(), set the others to 1
+      checkNDVs(
+        ndvs = ida.eval(buffer).asInstanceOf[ArrayData].toLongArray(),
+        expectedNdvs = expectedNdvs,
+        rsd = relativeSD)
+    }
+  }
+
+  private def checkNDVs(ndvs: Array[Long], expectedNdvs: Array[Long], rsd: Double): Unit = {
+    assert(ndvs.length == expectedNdvs.length)
+    for (i <- ndvs.indices) {
+      val ndv = ndvs(i)
+      val expectedNdv = expectedNdvs(i)
+      if (expectedNdv == 0) {
+        assert(ndv == 0)
+      } else if (expectedNdv > 0) {
+        assert(ndv > 0)
+        val error = math.abs((ndv / expectedNdv.toDouble) - 1.0d)
+        assert(error <= rsd * 3.0d, "Error should be within 3 std. errors.")
+      }
+    }
   }
 }

@@ -89,10 +89,11 @@ case class HyperLogLogPlusPlus(
   val hllppAlgo = new HyperLogLogPlusPlusAlgo(relativeSD)
 
   /** Allocate enough words to store all registers. */
-  override val aggBufferAttributes: Seq[AttributeReference] =
+  override val aggBufferAttributes: Seq[AttributeReference] = {
     Seq.tabulate(hllppAlgo.numWords) { i =>
       AttributeReference(s"MS[$i]", LongType)()
     }
+  }
 
   // Note: although this simply copies aggBufferAttributes, this common code can not be placed
   // in the superclass because that will lead to initialization ordering issues.
@@ -135,7 +136,7 @@ case class HyperLogLogPlusPlus(
 }
 
 object HyperLogLogPlusPlus {
-  private def validateDoubleLiteral(exp: Expression): Double = exp match {
+  def validateDoubleLiteral(exp: Expression): Double = exp match {
     case Literal(d: Double, DoubleType) => d
     case Literal(dec: Decimal, _) => dec.toDouble
     case _ =>
