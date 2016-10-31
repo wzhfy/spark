@@ -18,14 +18,16 @@
 package org.apache.spark.sql.execution.command
 
 import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.EliminateSubqueryAliases
 import org.apache.spark.sql.catalyst.catalog.{CatalogRelation, CatalogTable}
-import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.{CreateArray, _}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
-import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, ColumnStat, LogicalPlan, Statistics}
+import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeRowJoiner
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.types._
 
@@ -75,7 +77,7 @@ case class AnalyzeColumnCommand(
 
   def computeColStats(
       sparkSession: SparkSession,
-      relation: LogicalPlan): (Long, Map[String, ColumnStat]) = {
+      relation: LogicalPlan): (Long, Map[String, LeafColumnStat]) = {
 
     // check correctness of column names
     val attributesToAnalyze = mutable.MutableList[Attribute]()
@@ -101,20 +103,61 @@ case class AnalyzeColumnCommand(
     // The first element in the result will be the overall row count, the following elements
     // will be structs containing all column stats.
     // The layout of each struct follows the layout of the ColumnStats.
-    val ndvMaxErr = sparkSession.sessionState.conf.ndvMaxError
-    val expressions = Count(Literal(1)).toAggregateExpression() +:
-      attributesToAnalyze.map(ColumnStatStruct(_, ndvMaxErr))
+    val sqlConf = sparkSession.sessionState.conf
+    val expressions = Count(Literal(1)).toAggregateExpression() +: attributesToAnalyze.map(
+      ColumnStatStruct(_,
+        relativeSD = sqlConf.ndvMaxError,
+        numBins = sqlConf.histogramMaxBins,
+        accuracy = sqlConf.percentileAccuracy))
     val namedExpressions = expressions.map(e => Alias(e, e.toString)())
     val statsRow = Dataset.ofRows(sparkSession, Aggregate(Nil, namedExpressions, relation))
       .queryExecution.toRdd.collect().head
 
     // unwrap the result
     val rowCount = statsRow.getLong(0)
-    val columnStats = attributesToAnalyze.zipWithIndex.map { case (expr, i) =>
-      val numFields = ColumnStatStruct.numStatFields(expr.dataType)
-      (expr.name, ColumnStat(statsRow.getStruct(i + 1, numFields)))
+    // Aggs for computing equi-height histograms
+    val intervalDistinctAggs = new ArrayBuffer[(Attribute, Expression)]()
+    val columnStats = attributesToAnalyze.zipWithIndex.map { case (attr, i) =>
+      val numFields = ColumnStatStruct.numStatFields(attr.dataType)
+      val structRow = statsRow.getStruct(i + 1, numFields)
+      // check if we need to compute equi-height histograms
+      if (attr.dataType.isInstanceOf[NumericType] || attr.dataType.isInstanceOf[DateType] ||
+        attr.dataType.isInstanceOf[TimestampType]) {
+        // get the last result, which is endpoints of histogram
+        val mapData = structRow.getMap(4)
+        if (mapData.numElements() > sqlConf.histogramMaxBins) {
+          // the result contains `numBins+1` endpoints, which means we need to compute an
+          // equi-height histogram for this column
+          intervalDistinctAggs += ((attr, new IntervalDistinctApprox(attr,
+            CreateArray(mapData.keyArray().toDoubleArray().map(Literal(_))), sqlConf.ndvMaxError)))
+        }
+      }
+      (attr.name, LeafColumnStat(structRow))
     }.toMap
-    (rowCount, columnStats)
+
+    val statsWithIntervalDistinct = new mutable.HashMap[String, LeafColumnStat]()
+    if (intervalDistinctAggs.nonEmpty) {
+      val namedIntervalDistinctAggs = expressions.map(e => Alias(e, e.toString)())
+      val intervalDistinctRow = Dataset.ofRows(sparkSession,
+        Aggregate(Nil, namedIntervalDistinctAggs, relation)).queryExecution.toRdd.collect().head
+      // concatenate the previous statRow with this row
+      intervalDistinctAggs.zipWithIndex.map { case ((attr, agg), i) =>
+        val structRow = intervalDistinctRow.getStruct(i, 1)
+        val schema1 = ColumnStatStruct.numericColumnStat(
+          e = attr,
+          relativeSD = sqlConf.ndvMaxError,
+          numBins = sqlConf.histogramMaxBins,
+          accuracy = sqlConf.percentileAccuracy)
+          .map(e => Alias(e, e.toString)().toAttribute).toStructType
+        val schema2 = Seq(Alias(agg, agg.toString)().toAttribute).toStructType
+        val combiner = GenerateUnsafeRowJoiner.create(schema1, schema2)
+        val joinedRow = combiner.join(columnStats(attr.name).statRow.asInstanceOf[UnsafeRow],
+          structRow.asInstanceOf[UnsafeRow])
+        statsWithIntervalDistinct.put(attr.name, LeafColumnStat(joinedRow))
+      }
+    }
+    // update the previous statRow with the joined row
+    (rowCount, columnStats ++ statsWithIntervalDistinct)
   }
 }
 
@@ -131,6 +174,14 @@ object ColumnStatStruct {
     // the approximate ndv should never be larger than the number of rows
     Least(Seq(HyperLogLogPlusPlus(e, relativeSD), Count(one)))
   }
+  private def map(e: Expression, numBins: Int): Expression = new MapAggregate(e, Literal(numBins))
+  private def percentile(e: Expression, numBins: Int, accuracy: Int): Expression = {
+    val percentages = (0 to numBins).map(p => Literal(p / numBins.toDouble))
+    new ApproximatePercentile(e, CreateArray(percentages), Literal(accuracy))
+  }
+  private def countIntervals(e: Expression, relativeSD: Double, numBins: Int): Expression = {
+    new IntervalDistinctApprox(e, Literal(numBins), relativeSD)
+  }
   private def avgLength(e: Expression): Expression = Average(Length(e))
   private def maxLength(e: Expression): Expression = Max(Length(e))
   private def numTrues(e: Expression): Expression = Sum(If(e, one, zero))
@@ -144,12 +195,17 @@ object ColumnStatStruct {
     })
   }
 
-  private def numericColumnStat(e: Expression, relativeSD: Double): Seq[Expression] = {
-    Seq(numNulls(e), max(e), min(e), ndv(e, relativeSD))
+  def numericColumnStat(
+      e: Expression,
+      relativeSD: Double,
+      numBins: Int,
+      accuracy: Int): Seq[Expression] = {
+    Seq(numNulls(e), max(e), min(e), ndv(e, relativeSD), map(e, numBins),
+      percentile(e, numBins = numBins, accuracy = accuracy))
   }
 
-  private def stringColumnStat(e: Expression, relativeSD: Double): Seq[Expression] = {
-    Seq(numNulls(e), avgLength(e), maxLength(e), ndv(e, relativeSD))
+  private def stringColumnStat(e: Expression, relativeSD: Double, numBins: Int): Seq[Expression] = {
+    Seq(numNulls(e), avgLength(e), maxLength(e), ndv(e, relativeSD), map(e, numBins))
   }
 
   private def binaryColumnStat(e: Expression): Seq[Expression] = {
@@ -163,14 +219,21 @@ object ColumnStatStruct {
   def numStatFields(dataType: DataType): Int = {
     dataType match {
       case BinaryType | BooleanType => 3
-      case _ => 4
+      case StringType => 5
+      case _ => 6
     }
   }
 
-  def apply(attr: Attribute, relativeSD: Double): CreateStruct = attr.dataType match {
+  def apply(
+      attr: Attribute,
+      relativeSD: Double,
+      numBins: Int,
+      accuracy: Int): CreateStruct = attr.dataType match {
     // Use aggregate functions to compute statistics we need.
-    case _: NumericType | TimestampType | DateType => getStruct(numericColumnStat(attr, relativeSD))
-    case StringType => getStruct(stringColumnStat(attr, relativeSD))
+    case _: NumericType | TimestampType | DateType =>
+      getStruct(numericColumnStat(
+        attr, relativeSD = relativeSD, numBins = numBins, accuracy = accuracy))
+    case StringType => getStruct(stringColumnStat(attr, relativeSD = relativeSD, numBins = numBins))
     case BinaryType => getStruct(binaryColumnStat(attr))
     case BooleanType => getStruct(booleanColumnStat(attr))
     case otherType =>

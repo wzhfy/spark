@@ -18,7 +18,7 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Statistics}
+import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, LeafColumnStat, Statistics}
 import org.apache.spark.sql.execution.command.{AnalyzeColumnCommand, ColumnStatStruct}
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.test.SharedSQLContext
@@ -28,7 +28,7 @@ trait StatisticsTest extends QueryTest with SharedSQLContext {
 
   def checkColStats(
       df: DataFrame,
-      expectedColStatsSeq: Seq[(StructField, ColumnStat)]): Unit = {
+      expectedColStatsSeq: Seq[(StructField, LeafColumnStat)]): Unit = {
     val table = "tbl"
     withTable(table) {
       df.write.format("json").saveAsTable(table)
@@ -49,7 +49,7 @@ trait StatisticsTest extends QueryTest with SharedSQLContext {
         // check if we get the same colStat after encoding and decoding
         val encodedCS = colStat.toString
         val numFields = ColumnStatStruct.numStatFields(field.dataType)
-        val decodedCS = ColumnStat(numFields, encodedCS)
+        val decodedCS = LeafColumnStat(numFields, encodedCS)
         StatisticsTest.checkColStat(
           dataType = field.dataType,
           colStat = decodedCS,
@@ -74,38 +74,39 @@ object StatisticsTest {
   def checkColStat(
       dataType: DataType,
       colStat: ColumnStat,
-      expectedColStat: ColumnStat,
+      expectedColStat: LeafColumnStat,
       rsd: Double): Unit = {
+    val leafColStat = colStat.asInstanceOf[LeafColumnStat]
     dataType match {
       case StringType =>
-        val cs = colStat.forString
+        val cs = leafColStat.forString
         val expectedCS = expectedColStat.forString
         assert(cs.numNulls == expectedCS.numNulls)
         assert(cs.avgColLen == expectedCS.avgColLen)
         assert(cs.maxColLen == expectedCS.maxColLen)
         checkNdv(ndv = cs.ndv, expectedNdv = expectedCS.ndv, rsd = rsd)
       case BinaryType =>
-        val cs = colStat.forBinary
+        val cs = leafColStat.forBinary
         val expectedCS = expectedColStat.forBinary
         assert(cs.numNulls == expectedCS.numNulls)
         assert(cs.avgColLen == expectedCS.avgColLen)
         assert(cs.maxColLen == expectedCS.maxColLen)
       case BooleanType =>
-        val cs = colStat.forBoolean
+        val cs = leafColStat.forBoolean
         val expectedCS = expectedColStat.forBoolean
         assert(cs.numNulls == expectedCS.numNulls)
         assert(cs.numTrues == expectedCS.numTrues)
         assert(cs.numFalses == expectedCS.numFalses)
       case atomicType: AtomicType =>
-        checkNumericColStats(
-          dataType = atomicType, colStat = colStat, expectedColStat = expectedColStat, rsd = rsd)
+        checkNumericColStats(dataType = atomicType, colStat = leafColStat,
+          expectedColStat = expectedColStat, rsd = rsd)
     }
   }
 
   private def checkNumericColStats(
       dataType: AtomicType,
-      colStat: ColumnStat,
-      expectedColStat: ColumnStat,
+      colStat: LeafColumnStat,
+      expectedColStat: LeafColumnStat,
       rsd: Double): Unit = {
     val cs = colStat.forNumeric(dataType)
     val expectedCS = expectedColStat.forNumeric(dataType)

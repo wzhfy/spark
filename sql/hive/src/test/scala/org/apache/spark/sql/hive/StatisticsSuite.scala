@@ -23,7 +23,7 @@ import scala.reflect.ClassTag
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
-import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Statistics}
+import org.apache.spark.sql.catalyst.plans.logical.{LeafColumnStat, Statistics}
 import org.apache.spark.sql.execution.command.{AnalyzeTableCommand, DDLUtils}
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.joins._
@@ -408,7 +408,7 @@ class StatisticsSuite extends QueryTest with TestHiveSingleton with SQLTestUtils
     StatisticsTest.checkColStat(
       dataType = IntegerType,
       colStat = statsBeforeUpdate.colStats("key"),
-      expectedColStat = ColumnStat(InternalRow(0L, 1, 1, 1L)),
+      expectedColStat = LeafColumnStat(InternalRow(0L, 1, 1, 1L)),
       rsd = spark.sessionState.conf.ndvMaxError)
 
     assert(statsAfterUpdate.sizeInBytes > statsBeforeUpdate.sizeInBytes)
@@ -416,7 +416,7 @@ class StatisticsSuite extends QueryTest with TestHiveSingleton with SQLTestUtils
     StatisticsTest.checkColStat(
       dataType = IntegerType,
       colStat = statsAfterUpdate.colStats("key"),
-      expectedColStat = ColumnStat(InternalRow(0L, 2, 1, 2L)),
+      expectedColStat = LeafColumnStat(InternalRow(0L, 2, 1, 2L)),
       rsd = spark.sessionState.conf.ndvMaxError)
   }
 
@@ -431,18 +431,18 @@ class StatisticsSuite extends QueryTest with TestHiveSingleton with SQLTestUtils
       (intSeq(i), stringSeq(i), binarySeq(i), booleanSeq(i))
     }
     val df: DataFrame = data.toDF("c1", "c2", "c3", "c4")
-    val expectedColStatsSeq: Seq[(StructField, ColumnStat)] = df.schema.map { f =>
+    val expectedColStatsSeq: Seq[(StructField, LeafColumnStat)] = df.schema.map { f =>
       val colStat = f.dataType match {
         case IntegerType =>
-          ColumnStat(InternalRow(0L, intSeq.max, intSeq.min, intSeq.distinct.length.toLong))
+          LeafColumnStat(InternalRow(0L, intSeq.max, intSeq.min, intSeq.distinct.length.toLong))
         case StringType =>
-          ColumnStat(InternalRow(0L, stringSeq.map(_.length).sum / stringSeq.length.toDouble,
+          LeafColumnStat(InternalRow(0L, stringSeq.map(_.length).sum / stringSeq.length.toDouble,
             stringSeq.map(_.length).max.toInt, stringSeq.distinct.length.toLong))
         case BinaryType =>
-          ColumnStat(InternalRow(0L, binarySeq.map(_.length).sum / binarySeq.length.toDouble,
+          LeafColumnStat(InternalRow(0L, binarySeq.map(_.length).sum / binarySeq.length.toDouble,
             binarySeq.map(_.length).max.toInt))
         case BooleanType =>
-          ColumnStat(InternalRow(0L, booleanSeq.count(_.equals(true)).toLong,
+          LeafColumnStat(InternalRow(0L, booleanSeq.count(_.equals(true)).toLong,
             booleanSeq.count(_.equals(false)).toLong))
       }
       (f, colStat)
@@ -453,7 +453,7 @@ class StatisticsSuite extends QueryTest with TestHiveSingleton with SQLTestUtils
   private def checkColStats(
       tableName: String,
       isDataSourceTable: Boolean,
-      expectedColStatsSeq: Seq[(StructField, ColumnStat)]): Unit = {
+      expectedColStatsSeq: Seq[(StructField, LeafColumnStat)]): Unit = {
     val readback = spark.table(tableName)
     val stats = readback.queryExecution.analyzed.collect {
       case rel: MetastoreRelation =>
@@ -514,12 +514,12 @@ class StatisticsSuite extends QueryTest with TestHiveSingleton with SQLTestUtils
           StatisticsTest.checkColStat(
             dataType = IntegerType,
             colStat = columnStats(column1),
-            expectedColStat = ColumnStat(InternalRow(0L, 1, 1, 1L)),
+            expectedColStat = LeafColumnStat(InternalRow(0L, 1, 1, 1L)),
             rsd = spark.sessionState.conf.ndvMaxError)
           StatisticsTest.checkColStat(
             dataType = DoubleType,
             colStat = columnStats(column2),
-            expectedColStat = ColumnStat(InternalRow(0L, 3.0d, 3.0d, 1L)),
+            expectedColStat = LeafColumnStat(InternalRow(0L, 3.0d, 3.0d, 1L)),
             rsd = spark.sessionState.conf.ndvMaxError)
           rel
         }

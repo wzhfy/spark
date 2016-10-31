@@ -586,6 +586,23 @@ object SQLConf {
       .doubleConf
       .createWithDefault(0.05)
 
+  val PERCENTILE_APPROX_ACCURACY =
+    SQLConfigBuilder("spark.sql.statistics.percentileApprox.accuracy")
+      .internal()
+      .doc("The approximation accuracy for computing approximate percentiles. Higher value " +
+        "yields better accuracy at the cost of memory, `1.0/accuracy` is the relative error of " +
+        "the approximation.")
+      .intConf
+      .createWithDefault(10000)
+
+  val HISTOGRAM_MAX_BINS =
+    SQLConfigBuilder("spark.sql.statistics.histogram.maxNumBins")
+      .internal()
+      .doc("The maximum number of bins in a histogram. Higher value yields better accuracy of " +
+        "cost estimation, at the cost of higher memory and computation overhead.")
+      .intConf
+      .createWithDefault(254)
+
   val IGNORE_CORRUPT_FILES = SQLConfigBuilder("spark.sql.files.ignoreCorruptFiles")
     .doc("Whether to ignore corrupt files. If true, the Spark jobs will continue to run when " +
       "encountering corrupt files and contents that have been read will still be returned.")
@@ -770,6 +787,10 @@ private[sql] class SQLConf extends Serializable with CatalystConf with Logging {
   override def crossJoinEnabled: Boolean = getConf(SQLConf.CROSS_JOINS_ENABLED)
 
   def ndvMaxError: Double = getConf(NDV_MAX_ERROR)
+
+  def percentileAccuracy: Int = getConf(PERCENTILE_APPROX_ACCURACY)
+
+  def histogramMaxBins: Int = getConf(HISTOGRAM_MAX_BINS)
   /** ********************** SQLConf functionality methods ************ */
 
   /** Set Spark SQL configuration properties. */
