@@ -235,6 +235,7 @@ object FunctionRegistry {
     expression[Remainder]("%"),
 
     // aggregate functions
+    expression[MapAggregate]("map_aggregate"),
     expression[HyperLogLogPlusPlus]("approx_count_distinct"),
     expression[Average]("avg"),
     expression[Corr]("corr"),
