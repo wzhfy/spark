@@ -18,12 +18,12 @@
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
 import java.nio.ByteBuffer
+import java.util
 
-import scala.collection.immutable.TreeMap
 import scala.collection.mutable
 
 import com.google.common.primitives.{Doubles, Ints, Longs}
-
+import org.apache.spark.serializer.{KryoSerializer, KryoSerializerInstance}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{TypeCheckFailure, TypeCheckSuccess}
@@ -33,14 +33,15 @@ import org.apache.spark.sql.types.{DataType, _}
 import org.apache.spark.unsafe.types.UTF8String
 
 /**
- * The MapAggregate function Computes frequency for each distinct non-null value of a column.
+ * This function computes frequency for each distinct non-null value of a column.
  * It returns: 1. null if the table is empty or all values of the column are null.
  * 2. (distinct non-null value, frequency) pairs if the number of distinct non-null values is
  * less than or equal to the specified threshold.
  * 3. an empty result if the number of distinct non-null values exceeds that threshold.
  *
  * @param child child expression that can produce column value with `child.eval(inputRow)`
- * @param numBinsExpression The maximum number of pairs.
+ * @param numBinsExpression a threshold of number of distinct non-null values, beyond which the
+ *                          function will return an empty result
  */
 @ExpressionDescription(
   usage = """
@@ -67,7 +68,7 @@ case class MapAggregate(
     this(child, numBinsExpression, 0, 0)
   }
 
-  // Mark as lazy so that numBinsExpression is not evaluated during tree transformation.
+  /** Mark as lazy so that numBinsExpression is not evaluated during tree transformation. */
   private lazy val numBins: Int = numBinsExpression.eval().asInstanceOf[Int]
 
   override def inputTypes: Seq[AbstractDataType] = {
@@ -79,7 +80,7 @@ case class MapAggregate(
     if (defaultCheck.isFailure) {
       defaultCheck
     } else if (!numBinsExpression.foldable) {
-      TypeCheckFailure("The maximum number of bins provided must be a constant literal")
+      TypeCheckFailure("The maximum number of bins provided must be a literal or constant foldable")
     } else if (numBins < 2) {
       val currentValue = if (numBinsExpression.eval() == null) null else numBins
       TypeCheckFailure(
@@ -113,21 +114,22 @@ case class MapAggregate(
       // return empty map
       ArrayBasedMapData(Map.empty)
     } else {
-      // sort the result to make it more readable
+      // sort the result to make it easy to use in histograms and readable to users
       val sorted = buffer match {
-        case stringDigest: StringMapDigest => TreeMap[UTF8String, Long](stringDigest.bins.toSeq: _*)
-        case numericDigest: NumericMapDigest => TreeMap[Double, Long](numericDigest.bins.toSeq: _*)
+        case stringDigest: StringMapDigest => new util.TreeMap(stringDigest.bins)
+        case numericDigest: NumericMapDigest => new util.TreeMap(numericDigest.bins)
       }
       if (sorted.isEmpty) {
         // don't have non-null values
         null
       } else {
-        ArrayBasedMapData(sorted.keys.toArray, sorted.values.toArray)
+        ArrayBasedMapData(sorted.keySet().toArray, sorted.values.toArray)
       }
     }
   }
 
   override def serialize(buffer: MapDigest): Array[Byte] = {
+    val serializer = new KryoSerializerInstance()
     buffer.serialize()
   }
 
@@ -164,8 +166,11 @@ case class MapAggregate(
   override def prettyName: String = "map_aggregate"
 }
 
+/**
+ *  This class maintains a map consisting of distinct values and their counts.
+ */
 trait MapDigest {
-  // Mark this MapDigest invalid when the size of the hashmap (ndv of the column) exceeds numBins
+  /** Mark this MapDigest invalid when the size of the map exceeds numBins */
   var isInvalid: Boolean
   def update(dataType: DataType, value: Any, numBins: Int): Unit
   def merge(otherDigest: MapDigest, numBins: Int): Unit
@@ -174,32 +179,30 @@ trait MapDigest {
 }
 
 abstract class MapDigestBase[T] extends MapDigest {
-  val bins: mutable.HashMap[T, Long]
+  /** HashMap[value of internal type T, count of the value] */
+  val bins: util.HashMap[T, Long]
 
-  // Update bins and clear it when its size exceeds numBins.
-  def updateMap(value: T, numBins: Int): Unit = {
-    mergeMap(mutable.HashMap(value -> 1L), numBins)
+  /** Update bins and clear it when its size exceeds numBins. */
+  def updateMap(key: T, value: Long, numBins: Int): Unit = {
+    if (bins.containsKey(key)) {
+      bins.put(key, bins.get(key) + value)
+    } else {
+      if (bins.size() >= numBins) {
+        isInvalid = true
+        bins.clear()
+      } else {
+        bins.put(key, value)
+      }
+    }
   }
 
-  // Merge two maps and clear bins when its size exceeds numBins.
+  /** Merge two maps and clear bins when its size exceeds numBins. */
   override def merge(otherDigest: MapDigest, numBins: Int): Unit = {
     val otherMap = otherDigest.asInstanceOf[MapDigestBase[T]].bins
-    mergeMap(otherMap, numBins)
-  }
-
-  def mergeMap(otherMap: mutable.HashMap[T, Long], numBins: Int): Unit = {
-    otherMap.foreach { case (key, value) =>
-      if (bins.contains(key)) {
-        bins.update(key, bins(key) + value)
-      } else {
-        if (bins.size >= numBins) {
-          isInvalid = true
-          bins.clear()
-          return
-        } else {
-          bins.put(key, value)
-        }
-      }
+    val otherEntries = otherMap.entrySet().iterator()
+    while (!isInvalid && otherEntries.hasNext) {
+      val entry = otherEntries.next()
+      updateMap(entry.getKey, entry.getValue, numBins)
     }
   }
 
@@ -222,11 +225,11 @@ abstract class MapDigestBase[T] extends MapDigest {
     buffer.array()
   }
 
-  def deserialize(bytes: Array[Byte]): (mutable.HashMap[T, Long], Boolean) = {
+  def deserialize(bytes: Array[Byte]): (util.HashMap[T, Long], Boolean) = {
     val buffer = ByteBuffer.wrap(bytes)
     val isInvalid = if (buffer.getInt == 0) true else false
     val size = buffer.getInt
-    val bins = new mutable.HashMap[T, Long]
+    val bins = new util.HashMap[T, Long]
     var i = 0
     while (i < size) {
       val key = getKey(buffer)
@@ -255,9 +258,8 @@ object MapDigest {
   }
 }
 
-// Digest class for column of string type.
 case class StringMapDigest(
-    override val bins: mutable.HashMap[UTF8String, Long] = mutable.HashMap.empty,
+    override val bins: util.HashMap[UTF8String, Long] = new util.HashMap(),
     override var isInvalid: Boolean = false) extends MapDigestBase[UTF8String] {
 
   override def update(dataType: DataType, value: Any, numBins: Int): Unit = {
@@ -284,13 +286,12 @@ case class StringMapDigest(
   }
 }
 
-// Digest class for column of numeric type.
 case class NumericMapDigest(
-    override val bins: mutable.HashMap[Double, Long] = mutable.HashMap.empty,
+    override val bins: util.HashMap[Double, Long] = new util.HashMap(),
     override var isInvalid: Boolean = false) extends MapDigestBase[Double] {
 
   override def update(dataType: DataType, value: Any, numBins: Int): Unit = {
-    // Use Double to represent endpoints (in histograms) for simplicity
+    // use Double to represent endpoints (in histograms) for simplicity
     val doubleValue = dataType match {
       case n: NumericType =>
         n.numeric.toDouble(value.asInstanceOf[n.InternalType])

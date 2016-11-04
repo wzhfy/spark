@@ -17,8 +17,6 @@
 
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
-import scala.collection.mutable
-
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
@@ -42,7 +40,7 @@ class MapAggregateSuite extends SparkFunSuite {
     assertEqual(
       nonLiterals.checkInputDataTypes(),
       TypeCheckFailure(
-        "The maximum number of bins provided must be a constant literal"))
+        "The maximum number of bins provided must be a literal or constant foldable"))
 
     Seq(Literal(1), Cast(Literal(null), IntegerType)).foreach { expr =>
       val wrongNumBins = new MapAggregate(attribute, numBinsExpression = expr)
@@ -95,10 +93,9 @@ class MapAggregateSuite extends SparkFunSuite {
     val emptyBuffer = agg.createAggregationBuffer()
     assert(compareEquals(emptyBuffer, agg.deserialize(agg.serialize(emptyBuffer))))
 
-    val random = new java.util.Random()
-    val mapData = mutable.HashMap(data.map(s => (s, random.nextInt(10000).toLong)): _*)
     val buffer = agg.createAggregationBuffer().asInstanceOf[MapDigestBase[T]]
-    buffer.mergeMap(mapData, numBins)
+    val random = new java.util.Random()
+    data.foreach(s => buffer.updateMap(s, random.nextInt(10000).toLong, numBins))
     assert(compareEquals(buffer, agg.deserialize(agg.serialize(buffer))))
   }
 
