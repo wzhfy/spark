@@ -199,6 +199,11 @@ case class CatalogTable(
       locationUri, inputFormat, outputFormat, serde, compressed, properties))
   }
 
+  /** Keep column stats in the table if `columnStatsEnabled` is true. */
+  def withColStatsIfEnabled(columnStatsEnabled: Boolean): CatalogTable = {
+    if (columnStatsEnabled || colStats.isEmpty) this else copy(colStats = None)
+  }
+
   override def toString: String = {
     val tableProperties = properties.map(p => p._1 + "=" + p._2).mkString("[", ", ", "]")
     val partitionColumns = partitionColumnNames.map(quoteIdentifier).mkString("[", ", ", "]")

@@ -43,6 +43,12 @@ trait CatalystConf {
   def crossJoinEnabled: Boolean
 
   /**
+   * When true, relation leaf node will have column statistics in their attributes, thus enabling
+   * CBO estimation based on column statistics.
+   */
+  def columnStatsEnabled: Boolean
+
+  /**
    * Returns the [[Resolver]] for the current configuration, which can be used to determine if two
    * identifiers are equal.
    */
@@ -62,5 +68,6 @@ case class SimpleCatalystConf(
     maxCaseBranchesForCodegen: Int = 20,
     runSQLonFile: Boolean = true,
     crossJoinEnabled: Boolean = false,
+    columnStatsEnabled: Boolean = true,
     warehousePath: String = "/user/hive/warehouse")
   extends CatalystConf

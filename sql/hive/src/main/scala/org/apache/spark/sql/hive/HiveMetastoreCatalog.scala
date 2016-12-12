@@ -58,6 +58,7 @@ private[hive] class HiveMetastoreCatalog(sparkSession: SparkSession) extends Log
     val cacheLoader = new CacheLoader[QualifiedTableName, LogicalPlan]() {
       override def load(in: QualifiedTableName): LogicalPlan = {
         logDebug(s"Creating new cached data source for $in")
+        // Always keep column stats when loading tables.
         val table = sparkSession.sharedState.externalCatalog.getTable(in.database, in.name)
 
         val pathOption = table.storage.locationUri.map("path" -> _)
@@ -105,9 +106,16 @@ private[hive] class HiveMetastoreCatalog(sparkSession: SparkSession) extends Log
     val qualifiedTableName = getQualifiedTableName(tableIdent)
     val table = sparkSession.sharedState.externalCatalog.getTable(
       qualifiedTableName.database, qualifiedTableName.name)
+      .withColStatsIfEnabled(sessionState.conf.columnStatsEnabled)
 
     if (DDLUtils.isDatasourceTable(table)) {
-      val dataSourceTable = cachedDataSourceTables(qualifiedTableName)
+      val dataSourceTable = cachedDataSourceTables(qualifiedTableName) match {
+        case l: LogicalRelation if l.catalogTable.isDefined
+          && l.catalogTable.get.colStats.isDefined && !sessionState.conf.columnStatsEnabled =>
+          l.copy(catalogTable = Some(l.catalogTable.get.copy(colStats = None)))
+        case plan =>
+          plan
+      }
       val qualifiedTable = SubqueryAlias(qualifiedTableName.name, dataSourceTable, None)
       // Then, if alias is specified, wrap the table with a Subquery using the alias.
       // Otherwise, wrap the table with a Subquery using the table name.
