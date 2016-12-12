@@ -64,13 +64,12 @@ case class AnalyzeColumnCommand(
       AnalyzeColumnCommand.computeColumnStats(sparkSession, tableIdent.table, relation, columnNames)
 
     // We also update table-level stats in order to keep them consistent with column-level stats.
-    val statistics = Statistics(
-      sizeInBytes = sizeInBytes,
-      rowCount = Some(rowCount),
-      // Newly computed column stats should override the existing ones.
-      colStats = catalogTable.stats.map(_.colStats).getOrElse(Map.empty) ++ newColStats)
+    val statistics = Statistics(sizeInBytes = sizeInBytes, rowCount = Some(rowCount))
+    // Newly computed column stats should override the existing ones.
+    val colStats = catalogTable.colStats.getOrElse(Map.empty) ++ newColStats
 
-    sessionState.catalog.alterTable(catalogTable.copy(stats = Some(statistics)))
+    sessionState.catalog.alterTable(
+      catalogTable.copy(stats = Some(statistics), colStats = Some(colStats)))
 
     // Refresh the cached data source table in the catalog.
     sessionState.catalog.refreshTable(tableIdentWithDB)

@@ -518,9 +518,11 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
       if (stats.rowCount.isDefined) {
         statsProperties += STATISTICS_NUM_ROWS -> stats.rowCount.get.toString()
       }
-      stats.colStats.foreach { case (colName, colStat) =>
-        colStat.toMap.foreach { case (k, v) =>
-          statsProperties += (columnStatKeyPropName(colName, k) -> v)
+      if (tableDefinition.colStats.isDefined) {
+        tableDefinition.colStats.get.foreach { case (colName, colStat) =>
+          colStat.toMap.foreach { case (k, v) =>
+            statsProperties += (columnStatKeyPropName(colName, k) -> v)
+          }
         }
       }
       tableDefinition.copy(properties = tableDefinition.properties ++ statsProperties)
@@ -658,8 +660,8 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
       table = table.copy(
         stats = Some(Statistics(
           sizeInBytes = BigInt(table.properties(STATISTICS_TOTAL_SIZE)),
-          rowCount = table.properties.get(STATISTICS_NUM_ROWS).map(BigInt(_)),
-          colStats = colStats.toMap)))
+          rowCount = table.properties.get(STATISTICS_NUM_ROWS).map(BigInt(_)))),
+        colStats = Some(colStats.toMap))
     }
 
     // Get the original table properties as defined by the user.

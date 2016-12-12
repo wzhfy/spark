@@ -221,23 +221,24 @@ abstract class StatisticsCollectionTestBase extends QueryTest with SQLTestUtils 
    */
   def checkColStats(
       df: DataFrame,
-      colStats: mutable.LinkedHashMap[String, ColumnStat]): Unit = {
+      expectedColStats: mutable.LinkedHashMap[String, ColumnStat]): Unit = {
     val tableName = "column_stats_test_" + randomName.nextInt(1000)
     withTable(tableName) {
       df.write.saveAsTable(tableName)
 
       // Collect statistics
       sql(s"analyze table $tableName compute STATISTICS FOR COLUMNS " +
-        colStats.keys.mkString(", "))
+        expectedColStats.keys.mkString(", "))
 
       // Validate statistics
       val table = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tableName))
-      assert(table.stats.isDefined)
-      assert(table.stats.get.colStats.size == colStats.size)
+      assert(table.colStats.isDefined)
+      val colStats = table.colStats.get
+      assert(colStats.size == expectedColStats.size)
 
-      colStats.foreach { case (k, v) =>
+      expectedColStats.foreach { case (k, v) =>
         withClue(s"column $k") {
-          assert(table.stats.get.colStats(k) == v)
+          assert(colStats(k) == v)
         }
       }
     }
