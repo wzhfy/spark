@@ -38,6 +38,7 @@ case class LogicalRelation(
 
   override val output: Seq[AttributeReference] = {
     val attrs = relation.schema.toAttributes
+      .map(a => a.withColumStat(catalogTable.flatMap(_.getColStatsByName(a.name))))
     expectedOutputAttributes.map { expectedAttrs =>
       assert(expectedAttrs.length == attrs.length)
       attrs.zip(expectedAttrs).map {

@@ -204,6 +204,9 @@ case class CatalogTable(
     if (columnStatsEnabled || colStats.isEmpty) this else copy(colStats = None)
   }
 
+  /** Get column stats in this table by the given name. */
+  def getColStatsByName(name: String): Option[ColumnStat] = colStats.flatMap(_.get(name))
+
   override def toString: String = {
     val tableProperties = properties.map(p => p._1 + "=" + p._2).mkString("[", ", ", "]")
     val partitionColumns = partitionColumnNames.map(quoteIdentifier).mkString("[", ", ", "]")
@@ -296,6 +299,7 @@ case class SimpleCatalogRelation(
 
   override val output: Seq[Attribute] = {
     val (partCols, dataCols) = metadata.schema.toAttributes
+      .map(a => a.withColumStat(catalogTable.getColStatsByName(a.name)))
       // Since data can be dumped in randomly with no validation, everything is nullable.
       .map(_.withNullability(true).withQualifier(Some(metadata.identifier.table)))
       .partition { a =>

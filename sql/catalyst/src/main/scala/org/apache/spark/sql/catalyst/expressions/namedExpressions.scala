@@ -100,6 +100,9 @@ trait NamedExpression extends Expression {
 
 abstract class Attribute extends LeafExpression with NamedExpression with NullIntolerant {
 
+  /** Column statistics of this attribute. */
+  val columnStat: Option[ColumnStat] = None
+
   override def references: AttributeSet = AttributeSet(this)
 
   def withNullability(newNullability: Boolean): Attribute
@@ -218,7 +221,7 @@ case class AttributeReference(
     val exprId: ExprId = NamedExpression.newExprId,
     val qualifier: Option[String] = None,
     override val isGenerated: java.lang.Boolean = false,
-    val columnStat: Option[ColumnStat] = None)
+    override val columnStat: Option[ColumnStat] = None)
   extends Attribute with Unevaluable {
 
   /**
@@ -303,6 +306,15 @@ case class AttributeReference(
   override def withMetadata(newMetadata: Metadata): Attribute = {
     AttributeReference(name, dataType, nullable, newMetadata)(exprId, qualifier, isGenerated,
       columnStat)
+  }
+
+  def withColumStat(newColumStat: Option[ColumnStat]): Attribute = {
+    if (columnStat == newColumStat) {
+      this
+    } else {
+      AttributeReference(name, dataType, nullable, metadata)(exprId, qualifier, isGenerated,
+        newColumStat)
+    }
   }
 
   override protected final def otherCopyArgs: Seq[AnyRef] = {
