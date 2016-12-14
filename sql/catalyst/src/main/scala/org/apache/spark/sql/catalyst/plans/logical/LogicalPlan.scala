@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.catalyst.plans.logical
 
+import scala.collection.mutable.ArrayBuffer
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.analysis._
@@ -92,6 +94,30 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
       throw new UnsupportedOperationException(s"LeafNode $nodeName must implement statistics.")
     }
     Statistics(sizeInBytes = children.map(_.statistics.sizeInBytes).product)
+  }
+
+  /**
+   * Gets column stats for output attributes from this plan.
+   *
+   * [[LeafNode]]s (e.g. relations) need to override this to load their column stats.
+   */
+  def outputStats: AttributeMap[ColumnStat] = {
+    val outputWithStats: Seq[(Attribute, ColumnStat)] = if (children.isEmpty) {
+      Nil
+    } else {
+      val outputStatsFromChildren =
+        AttributeMap(children.foldLeft(ArrayBuffer[(Attribute, ColumnStat)]()) { (buf, child) =>
+          buf ++ child.outputStats
+        })
+      output.foldLeft(ArrayBuffer[(Attribute, ColumnStat)]()) { (buf, attr) =>
+        if (outputStatsFromChildren.contains(attr)) {
+          buf += (attr -> outputStatsFromChildren(attr))
+        } else {
+          buf
+        }
+      }
+    }
+    AttributeMap(outputWithStats)
   }
 
   /**
