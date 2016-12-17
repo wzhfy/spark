@@ -100,9 +100,9 @@ trait ProgressReporter extends Logging {
     progressBuffer.toArray
   }
 
-  /** Returns the most recent query progress update. */
+  /** Returns the most recent query progress update or null if there were no progress updates. */
   def lastProgress: StreamingQueryProgress = progressBuffer.synchronized {
-    progressBuffer.last
+    progressBuffer.lastOption.orNull
   }
 
   /** Begins recording statistics about query progress for a given trigger. */
@@ -159,8 +159,8 @@ trait ProgressReporter extends Logging {
       name = name,
       timestamp = formatTimestamp(currentTriggerStartTimestamp),
       batchId = currentBatchId,
-      durationMs = currentDurationsMs.toMap.mapValues(long2Long).asJava,
-      eventTime = executionStats.eventTimeStats.asJava,
+      durationMs = new java.util.HashMap(currentDurationsMs.toMap.mapValues(long2Long).asJava),
+      eventTime = new java.util.HashMap(executionStats.eventTimeStats.asJava),
       stateOperators = executionStats.stateOperators.toArray,
       sources = sourceProgress.toArray,
       sink = sinkProgress)
