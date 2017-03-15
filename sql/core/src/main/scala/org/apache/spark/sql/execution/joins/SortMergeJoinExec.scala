@@ -79,7 +79,25 @@ case class SortMergeJoinExec(
   override def requiredChildDistribution: Seq[Distribution] =
     ClusteredDistribution(leftKeys) :: ClusteredDistribution(rightKeys) :: Nil
 
-  override def outputOrdering: Seq[SortOrder] = requiredOrders(leftKeys)
+  override def outputOrdering: Seq[SortOrder] = joinType match {
+    case Inner =>
+      left.outputOrdering.zip(right.outputOrdering).map { case (lKey, rKey) =>
+        // Find expression with the same sort order
+        left.outputOrdering
+        SortOrder(lKey, Ascending, rKey :: Nil)
+      }
+    case RightOuter =>
+      requiredOrders(rightKeys)
+    case FullOuter =>
+      Nil
+    case _ =>
+      requiredOrders(leftKeys)
+  }
+
+  private def getSameOrderExprFromChild(keys: Seq[Expression], childOutputOrdering: Seq[SortOrder])
+    : Unit = {
+    
+  }
 
   override def requiredChildOrdering: Seq[Seq[SortOrder]] =
     requiredOrders(leftKeys) :: requiredOrders(rightKeys) :: Nil

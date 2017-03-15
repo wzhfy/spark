@@ -471,6 +471,34 @@ class PlannerSuite extends SharedSQLContext {
     }
   }
 
+  test("EnsureRequirements skips sort when the right key is required after a SortMergeJoinExec") {
+    val attrA = AttributeReference("a", IntegerType)()
+    val attrB = AttributeReference("b", IntegerType)()
+    val orderingA = SortOrder(attrA, Ascending)
+    val orderingB = SortOrder(attrB, Ascending)
+
+    val smj = SortMergeJoinExec(
+      attrA :: Nil,
+      attrB :: Nil,
+      Inner,
+      None,
+      DummySparkPlan(outputOrdering = Seq(orderingA),
+        outputPartitioning = HashPartitioning(attrA :: Nil, 5)),
+      DummySparkPlan(outputOrdering = Seq(orderingB),
+        outputPartitioning = HashPartitioning(attrB :: Nil, 5)))
+
+    val inputPlan = DummySparkPlan(
+      children = smj :: Nil,
+      requiredChildOrdering = Seq(Seq(orderingB)),
+      requiredChildDistribution = Seq(UnspecifiedDistribution)
+    )
+    val outputPlan = EnsureRequirements(spark.sessionState.conf).apply(inputPlan)
+    assertDistributionRequirementsAreSatisfied(outputPlan)
+    if (outputPlan.collect { case s: SortExec => true }.nonEmpty) {
+      fail(s"No sorts should have been added:\n$outputPlan")
+    }
+  }
+
   test("EnsureRequirements eliminates Exchange if child has Exchange with same partitioning") {
     val distribution = ClusteredDistribution(Literal(1) :: Nil)
     val finalPartitioning = HashPartitioning(Literal(1) :: Nil, 5)
