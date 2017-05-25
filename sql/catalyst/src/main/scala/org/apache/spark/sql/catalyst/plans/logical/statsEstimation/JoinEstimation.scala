@@ -59,15 +59,30 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
     case _ if !rowCountsExist(conf, join.left, join.right) =>
       None
 
-    case ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, _, _, _) =>
-      // 1. Compute join selectivity
-      val joinKeyPairs = extractJoinKeysWithColStats(leftKeys, rightKeys)
-      val selectivity = joinSelectivity(joinKeyPairs)
-
-      // 2. Estimate the number of output rows
+    case ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, otherCondition, _, _) =>
       val leftRows = leftStats.rowCount.get
       val rightRows = rightStats.rowCount.get
-      val innerJoinedRows = ceil(BigDecimal(leftRows * rightRows) * selectivity)
+      val product = leftRows * rightRows
+      var selectivity = 1.0
+
+      // 1. Compute join selectivity
+      val joinKeyPairs = extractJoinKeysWithColStats(leftKeys, rightKeys)
+      // 1.1 compute selectivity based on equi-join conditions
+      val equiJoinSel = equiJoinSelectivity(joinKeyPairs)
+      val inputAttrStats = AttributeMap(
+        leftStats.attributeStats.toSeq ++ rightStats.attributeStats.toSeq)
+      val attributesWithStat = join.output.filter(a => inputAttrStats.contains(a))
+      if (equiJoinSel > 0) {
+        // the equi-join part is non-empty, i.e. join keys are intersected
+        val joinKeyStats = getIntersectedStats(joinKeyPairs)
+        val equiJoinRows = ceil(BigDecimal(product) * equiJoinSel)
+        val equiJoinColStats = updateAttrStats(equiJoinRows, attributesWithStat, inputAttrStats,
+          joinKeyStats)
+        // 1.2 after evaluate equi-join conditions, compute selectivity based on other predicates.
+      }
+
+      // 2. Estimate the number of output rows
+      val innerJoinedRows = ceil(BigDecimal(product) * selectivity)
 
       // Make sure outputRows won't be too small based on join type.
       val outputRows = joinType match {
@@ -86,11 +101,7 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
       }
 
       // 3. Update statistics based on the output of join
-      val inputAttrStats = AttributeMap(
-        leftStats.attributeStats.toSeq ++ rightStats.attributeStats.toSeq)
-      val attributesWithStat = join.output.filter(a => inputAttrStats.contains(a))
       val (fromLeft, fromRight) = attributesWithStat.partition(join.left.outputSet.contains(_))
-
       val outputStats: Seq[(Attribute, ColumnStat)] = if (outputRows == 0) {
         // The output is empty, we don't need to keep column stats.
         Nil
@@ -120,7 +131,6 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
         // Cartesian product, just propagate the original column stats
         inputAttrStats.toSeq
       } else {
-        val joinKeyStats = getIntersectedStats(joinKeyPairs)
         join.joinType match {
           // For outer joins, don't update column stats from the outer side.
           case LeftOuter =>
@@ -168,7 +178,8 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
    * conservative strategy to take only the largest max(V(A.ki), V(B.ki)) as the denominator.
    */
   // scalastyle:on
-  def joinSelectivity(joinKeyPairs: Seq[(AttributeReference, AttributeReference)]): BigDecimal = {
+  def equiJoinSelectivity(joinKeyPairs: Seq[(AttributeReference, AttributeReference)])
+    : BigDecimal = {
     var ndvDenom: BigInt = -1
     var i = 0
     while(i < joinKeyPairs.length && ndvDenom != 0) {
@@ -207,7 +218,7 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
       outputRows: BigInt,
       attributes: Seq[Attribute],
       oldAttrStats: AttributeMap[ColumnStat],
-      joinKeyStats: AttributeMap[ColumnStat]): Seq[(Attribute, ColumnStat)] = {
+      joinKeyStats: AttributeMap[ColumnStat]): AttributeMap[ColumnStat] = {
     val outputAttrStats = new ArrayBuffer[(Attribute, ColumnStat)]()
     val leftRows = leftStats.rowCount.get
     val rightRows = rightStats.rowCount.get
@@ -229,7 +240,7 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
         outputAttrStats += a -> newColStat
       }
     }
-    outputAttrStats
+    AttributeMap(outputAttrStats)
   }
 
   /** Get intersected column stats for join keys. */

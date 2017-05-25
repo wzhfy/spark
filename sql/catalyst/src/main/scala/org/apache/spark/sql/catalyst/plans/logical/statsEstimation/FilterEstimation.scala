@@ -25,12 +25,9 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
 import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Filter, LeafNode, Statistics}
 import org.apache.spark.sql.catalyst.plans.logical.statsEstimation.EstimationUtils._
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
-case class FilterEstimation(plan: Filter, catalystConf: SQLConf) extends Logging {
-
-  private val childStats = plan.child.stats(catalystConf)
+case class FilterEstimation(plan: Filter, childStats: Statistics) extends Logging {
 
   private val colStatsMap = new ColumnStatsMap(childStats.attributeStats)
 
@@ -51,17 +48,21 @@ case class FilterEstimation(plan: Filter, catalystConf: SQLConf) extends Logging
     val filterSelectivity = calculateFilterSelectivity(plan.condition).getOrElse(BigDecimal(1.0))
 
     val filteredRowCount: BigInt = ceil(BigDecimal(childStats.rowCount.get) * filterSelectivity)
-    val newColStats = if (filteredRowCount == 0) {
+    val newColStats = updatedColumnStats(filteredRowCount)
+    val filteredSizeInBytes: BigInt = getOutputSize(plan.output, filteredRowCount, newColStats)
+
+    Some(childStats.copy(sizeInBytes = filteredSizeInBytes, rowCount = Some(filteredRowCount),
+      attributeStats = newColStats))
+  }
+
+  def updatedColumnStats(filteredRowCount: BigInt): AttributeMap[ColumnStat] = {
+    if (filteredRowCount == 0) {
       // The output is empty, we don't need to keep column stats.
       AttributeMap[ColumnStat](Nil)
     } else {
       colStatsMap.outputColumnStats(rowsBeforeFilter = childStats.rowCount.get,
         rowsAfterFilter = filteredRowCount)
     }
-    val filteredSizeInBytes: BigInt = getOutputSize(plan.output, filteredRowCount, newColStats)
-
-    Some(childStats.copy(sizeInBytes = filteredSizeInBytes, rowCount = Some(filteredRowCount),
-      attributeStats = newColStats))
   }
 
   /**
