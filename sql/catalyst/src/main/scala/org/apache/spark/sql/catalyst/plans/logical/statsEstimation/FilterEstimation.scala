@@ -23,16 +23,14 @@ import scala.collection.mutable
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
-import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Filter, LeafNode, Statistics}
+import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Statistics}
 import org.apache.spark.sql.catalyst.plans.logical.statsEstimation.EstimationUtils._
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
-case class FilterEstimation(plan: Filter, catalystConf: SQLConf) extends Logging {
+case class FilterEstimation(condition: Expression, output: Seq[Attribute], inputStats: Statistics)
+  extends Logging {
 
-  private val childStats = plan.child.stats(catalystConf)
-
-  private val colStatsMap = new ColumnStatsMap(childStats.attributeStats)
+  private val colStatsMap = new ColumnStatsMap(inputStats.attributeStats)
 
   /**
    * Returns an option of Statistics for a Filter logical plan node.
@@ -44,23 +42,23 @@ case class FilterEstimation(plan: Filter, catalystConf: SQLConf) extends Logging
    * @return Option[Statistics] When there is no statistics collected, it returns None.
    */
   def estimate: Option[Statistics] = {
-    if (childStats.rowCount.isEmpty) return None
+    if (inputStats.rowCount.isEmpty) return None
 
     // Estimate selectivity of this filter predicate, and update column stats if needed.
     // For not-supported condition, set filter selectivity to a conservative estimate 100%
-    val filterSelectivity = calculateFilterSelectivity(plan.condition).getOrElse(BigDecimal(1.0))
+    val filterSelectivity = calculateFilterSelectivity(condition).getOrElse(BigDecimal(1.0))
 
-    val filteredRowCount: BigInt = ceil(BigDecimal(childStats.rowCount.get) * filterSelectivity)
+    val filteredRowCount: BigInt = ceil(BigDecimal(inputStats.rowCount.get) * filterSelectivity)
     val newColStats = if (filteredRowCount == 0) {
       // The output is empty, we don't need to keep column stats.
       AttributeMap[ColumnStat](Nil)
     } else {
-      colStatsMap.outputColumnStats(rowsBeforeFilter = childStats.rowCount.get,
+      colStatsMap.outputColumnStats(rowsBeforeFilter = inputStats.rowCount.get,
         rowsAfterFilter = filteredRowCount)
     }
-    val filteredSizeInBytes: BigInt = getOutputSize(plan.output, filteredRowCount, newColStats)
+    val filteredSizeInBytes: BigInt = getOutputSize(output, filteredRowCount, newColStats)
 
-    Some(childStats.copy(sizeInBytes = filteredSizeInBytes, rowCount = Some(filteredRowCount),
+    Some(inputStats.copy(sizeInBytes = filteredSizeInBytes, rowCount = Some(filteredRowCount),
       attributeStats = newColStats))
   }
 
@@ -183,10 +181,10 @@ case class FilterEstimation(plan: Filter, catalystConf: SQLConf) extends Logging
       // So for IsNull and IsNotNull predicates, we only estimate them when the child is a leaf
       // node, whose `nullCount` is accurate.
       // This is a limitation due to lack of advanced stats. We should remove it in the future.
-      case IsNull(ar: Attribute) if plan.child.isInstanceOf[LeafNode] =>
+      case IsNull(ar: Attribute) =>
         evaluateNullCheck(ar, isNull = true, update)
 
-      case IsNotNull(ar: Attribute) if plan.child.isInstanceOf[LeafNode] =>
+      case IsNotNull(ar: Attribute) =>
         evaluateNullCheck(ar, isNull = false, update)
 
       case op @ Equality(attrLeft: Attribute, attrRight: Attribute) =>
@@ -232,7 +230,7 @@ case class FilterEstimation(plan: Filter, catalystConf: SQLConf) extends Logging
       return None
     }
     val colStat = colStatsMap(attr)
-    val rowCountValue = childStats.rowCount.get
+    val rowCountValue = inputStats.rowCount.get
     val nullPercent: BigDecimal = if (rowCountValue == 0) {
       0
     } else {

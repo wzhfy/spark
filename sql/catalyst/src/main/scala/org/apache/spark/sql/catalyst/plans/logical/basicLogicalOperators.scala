@@ -140,7 +140,8 @@ case class Filter(condition: Expression, child: LogicalPlan)
 
   override def computeStats(conf: SQLConf): Statistics = {
     if (conf.cboEnabled) {
-      FilterEstimation(this, conf).estimate.getOrElse(super.computeStats(conf))
+      FilterEstimation(condition, output, child.stats(conf))
+        .estimate.getOrElse(super.computeStats(conf))
     } else {
       super.computeStats(conf)
     }

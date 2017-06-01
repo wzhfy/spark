@@ -21,7 +21,7 @@ import java.sql.{Date, Timestamp}
 
 import scala.collection.mutable
 
-import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeMap, AttributeReference, EqualTo}
+import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeMap, AttributeReference, EqualTo, LessThan}
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, Join, Project, Statistics}
 import org.apache.spark.sql.catalyst.plans.logical.statsEstimation.EstimationUtils._
@@ -66,6 +66,18 @@ class JoinEstimationSuite extends StatsEstimationTestBase {
     outputList = Seq("key-1-2", "key-2-3").map(nameToAttr),
     rowCount = 2,
     attributeStats = AttributeMap(Seq("key-1-2", "key-2-3").map(nameToColInfo)))
+
+  test("xxx") {
+    val a = attr("a")
+    val b = attr("b")
+    val c = attr("c")
+    val d = attr("d")
+    val buf = mutable.Buffer(EqualTo(a, b), LessThan(c, d))
+    val left = buf -- Seq(EqualTo(a, b))
+    // scalastyle:off
+    println(left)
+    // scalastyle:on
+  }
 
   test("cross join") {
     // table1 (key-1-5 int, key-5-9 int): (1, 9), (2, 8), (3, 7), (4, 6), (5, 5)

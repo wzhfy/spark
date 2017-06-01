@@ -59,10 +59,9 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
     case _ if !rowCountsExist(conf, join.left, join.right) =>
       None
 
-    case ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, _, _, _) =>
+    case ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, otherCondition, _, _) =>
       // 1. Compute join selectivity
-      val joinKeyPairs = extractJoinKeysWithColStats(leftKeys, rightKeys)
-      val selectivity = joinSelectivity(joinKeyPairs)
+      val (selectivity, innerColStats) = innerJoinSelectivity(leftKeys, rightKeys, otherCondition)
 
       // 2. Estimate the number of output rows
       val leftRows = leftStats.rowCount.get
@@ -120,20 +119,16 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
         // Cartesian product, just propagate the original column stats
         inputAttrStats.toSeq
       } else {
-        val joinKeyStats = getIntersectedStats(joinKeyPairs)
         join.joinType match {
           // For outer joins, don't update column stats from the outer side.
           case LeftOuter =>
-            fromLeft.map(a => (a, inputAttrStats(a))) ++
-              updateAttrStats(outputRows, fromRight, inputAttrStats, joinKeyStats)
+            fromLeft.map(a => (a, inputAttrStats(a))) ++ fromRight.map(a => (a, innerColStats(a)))
           case RightOuter =>
-            updateAttrStats(outputRows, fromLeft, inputAttrStats, joinKeyStats) ++
-              fromRight.map(a => (a, inputAttrStats(a)))
+            fromLeft.map(a => (a, innerColStats(a))) ++ fromRight.map(a => (a, inputAttrStats(a)))
           case FullOuter =>
             inputAttrStats.toSeq
           case _ =>
-            // Update column stats from both sides for inner or cross join.
-            updateAttrStats(outputRows, attributesWithStat, inputAttrStats, joinKeyStats)
+            innerColStats.toSeq
         }
       }
 
@@ -155,6 +150,41 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
         attributeStats = inputAttrStats))
   }
 
+  def innerJoinSelectivity(
+      leftKeys: Seq[Expression],
+      rightKeys: Seq[Expression],
+      otherCondition: Option[Expression]): (BigDecimal, AttributeMap[ColumnStat]) = {
+    val joinKeyPairs = extractJoinKeysWithColStats(leftKeys, rightKeys)
+    val equiSel = equiJoinSelectivity(joinKeyPairs)
+    if (equiSel > 0) {
+      val leftRows = leftStats.rowCount.get
+      val rightRows = rightStats.rowCount.get
+      val equiJoinedRows = ceil(BigDecimal(leftRows * rightRows) * equiSel)
+
+      val inputAttrStats = AttributeMap(
+        leftStats.attributeStats.toSeq ++ rightStats.attributeStats.toSeq)
+      val attributesWithStats = join.output.filter(a => inputAttrStats.contains(a))
+      val joinKeyStats = getIntersectedStats(joinKeyPairs)
+      val equiColStats = updateAttrStats(equiJoinedRows, attributesWithStats, inputAttrStats,
+        joinKeyStats)
+
+      if (otherCondition.nonEmpty) {
+        val equiStats = Statistics(
+          sizeInBytes = getOutputSize(join.output, equiJoinedRows, AttributeMap(equiColStats)),
+          rowCount = Some(equiJoinedRows),
+          attributeStats = AttributeMap(equiColStats))
+        val innerStats = FilterEstimation(condition = otherCondition.get,
+          output = join.left.output ++ join.right.output, inputStats = equiStats).estimate.get
+        val innerSel = BigDecimal(innerStats.rowCount.get) / BigDecimal(leftRows * rightRows)
+        (innerSel, innerStats.attributeStats)
+      } else {
+        (equiSel, AttributeMap(equiColStats))
+      }
+    } else {
+      (0, AttributeMap(Nil))
+    }
+  }
+
   // scalastyle:off
   /**
    * The number of rows of A inner join B on A.k1 = B.k1 is estimated by this basic formula:
@@ -168,7 +198,8 @@ case class InnerOuterEstimation(conf: SQLConf, join: Join) extends Logging {
    * conservative strategy to take only the largest max(V(A.ki), V(B.ki)) as the denominator.
    */
   // scalastyle:on
-  def joinSelectivity(joinKeyPairs: Seq[(AttributeReference, AttributeReference)]): BigDecimal = {
+  def equiJoinSelectivity(joinKeyPairs: Seq[(AttributeReference, AttributeReference)])
+    : BigDecimal = {
     var ndvDenom: BigInt = -1
     var i = 0
     while(i < joinKeyPairs.length && ndvDenom != 0) {
