@@ -400,6 +400,7 @@ case class LoadDataCommand(
     // Refresh the metadata cache to ensure the data visible to the users
     catalog.refreshTable(targetTable.identifier)
 
+    CommandUtils.updateTableStats(sparkSession, targetTable)
     Seq.empty[Row]
   }
 }
@@ -487,6 +488,8 @@ case class TruncateTableCommand(
       case NonFatal(e) =>
         log.warn(s"Exception when attempting to uncache table $tableIdentWithDB", e)
     }
+    // empty table after truncation
+    CommandUtils.updateTableStats(spark, table, newTableSize = Some(0), newRowCount = Some(0))
     Seq.empty[Row]
   }
 }

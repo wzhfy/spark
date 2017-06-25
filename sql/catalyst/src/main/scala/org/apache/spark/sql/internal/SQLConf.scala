@@ -774,6 +774,12 @@ object SQLConf {
       .doubleConf
       .createWithDefault(0.05)
 
+  val AUTO_STATS_UPDATE =
+    buildConf("spark.sql.statistics.autoUpdate")
+      .doc("Enables automatic statistics update once table's data is changed.")
+      .booleanConf
+      .createWithDefault(false)
+
   val CBO_ENABLED =
     buildConf("spark.sql.cbo.enabled")
       .doc("Enables CBO for estimation of plan statistics when set true.")
@@ -1100,6 +1106,8 @@ class SQLConf extends Serializable with Logging {
   def ndvMaxError: Double = getConf(NDV_MAX_ERROR)
 
   def cboEnabled: Boolean = getConf(SQLConf.CBO_ENABLED)
+
+  def autoStatsUpdate: Boolean = getConf(SQLConf.AUTO_STATS_UPDATE)
 
   def joinReorderEnabled: Boolean = getConf(SQLConf.JOIN_REORDER_ENABLED)
 
