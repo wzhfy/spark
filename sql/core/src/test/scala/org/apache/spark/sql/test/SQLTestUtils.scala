@@ -22,7 +22,6 @@ import java.net.URI
 import java.nio.file.Files
 import java.util.{Locale, UUID}
 
-import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.language.implicitConversions
 import scala.util.control.NonFatal
@@ -171,10 +170,7 @@ private[sql] trait SQLTestUtils
    * deleted after `f` returns.
    */
   protected def withTempPaths(numPaths: Int)(f: Seq[File] => Unit): Unit = {
-    val files = mutable.Buffer[File]()
-    for (i <- 0 until numPaths) {
-      files += Utils.createTempDir().getCanonicalFile
-    }
+    val files = Array.fill[File](numPaths)(Utils.createTempDir().getCanonicalFile)
     try f(files) finally {
       // wait for all tasks to finish before deleting files
       waitForTasksToFinish()

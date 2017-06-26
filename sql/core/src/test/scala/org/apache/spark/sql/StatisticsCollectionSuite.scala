@@ -160,7 +160,7 @@ class StatisticsCollectionSuite extends StatisticsCollectionTestBase with Shared
 
   test("update stats after truncate command") {
     val table = "update_stats_truncate_table"
-    withSQLConf(SQLConf.AUTO_STATS_UPDATE.key -> "true") {
+    withSQLConf(SQLConf.AUTO_UPDATE_SIZE.key -> "true") {
       withTable(table) {
         spark.range(100).select($"id", $"id" % 5 as "value").write.saveAsTable(table)
         // analyze to get initial stats
@@ -179,7 +179,7 @@ class StatisticsCollectionSuite extends StatisticsCollectionTestBase with Shared
 
   test("update stats after set location command") {
     val table = "update_stats_set_location_table"
-    withSQLConf(SQLConf.AUTO_STATS_UPDATE.key -> "true") {
+    withSQLConf(SQLConf.AUTO_UPDATE_SIZE.key -> "true") {
       withTable(table) {
         spark.range(100).select($"id", $"id" % 5 as "value").write.saveAsTable(table)
         // analyze to get initial stats
@@ -306,7 +306,7 @@ abstract class StatisticsCollectionTestBase extends QueryTest with SQLTestUtils 
     val tableType = if (isHiveTable) "hive_table" else "datasource_table"
     val table = s"update_stats_insert_$tableType"
 
-    withSQLConf(SQLConf.AUTO_STATS_UPDATE.key -> "true") {
+    withSQLConf(SQLConf.AUTO_UPDATE_SIZE.key -> "true") {
       withTable(table) {
         if (isHiveTable) {
           sql(s"CREATE TABLE $table (i int, j string)")

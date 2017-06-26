@@ -40,7 +40,7 @@ object CommandUtils extends Logging {
       table: CatalogTable,
       newTableSize: Option[BigInt] = None,
       newRowCount: Option[BigInt] = None): Unit = {
-    if (sparkSession.sessionState.conf.autoStatsUpdate && table.stats.nonEmpty) {
+    if (sparkSession.sessionState.conf.autoUpdateSize && table.stats.nonEmpty) {
       val catalog = sparkSession.sessionState.catalog
       val newTable = catalog.getTableMetadata(table.identifier)
       val newSize = newTableSize.getOrElse(

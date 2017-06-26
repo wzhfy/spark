@@ -774,9 +774,10 @@ object SQLConf {
       .doubleConf
       .createWithDefault(0.05)
 
-  val AUTO_STATS_UPDATE =
-    buildConf("spark.sql.statistics.autoUpdate")
-      .doc("Enables automatic statistics update once table's data is changed.")
+  val AUTO_UPDATE_SIZE =
+    buildConf("spark.sql.statistics.autoUpdate.size")
+      .doc("Enables automatic update for table size once table's data is changed. " +
+      "Note that this update also removes other statistics (e.g. row count and column statistics)")
       .booleanConf
       .createWithDefault(false)
 
@@ -1107,7 +1108,7 @@ class SQLConf extends Serializable with Logging {
 
   def cboEnabled: Boolean = getConf(SQLConf.CBO_ENABLED)
 
-  def autoStatsUpdate: Boolean = getConf(SQLConf.AUTO_STATS_UPDATE)
+  def autoUpdateSize: Boolean = getConf(SQLConf.AUTO_UPDATE_SIZE)
 
   def joinReorderEnabled: Boolean = getConf(SQLConf.JOIN_REORDER_ENABLED)
 

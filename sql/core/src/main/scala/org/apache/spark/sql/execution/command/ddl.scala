@@ -436,7 +436,7 @@ case class AlterTableAddPartitionCommand(
         locationUri = location.map(CatalogUtils.stringToURI)))
     }
     catalog.createPartitions(table.identifier, parts, ignoreIfExists = ifNotExists)
-    if (table.stats.nonEmpty && sparkSession.sessionState.conf.autoStatsUpdate) {
+    if (table.stats.nonEmpty && sparkSession.sessionState.conf.autoUpdateSize) {
       val addedSize = parts.map { part =>
         CommandUtils.calculateLocationSize(sparkSession.sessionState, table.identifier,
           part.storage.locationUri)
