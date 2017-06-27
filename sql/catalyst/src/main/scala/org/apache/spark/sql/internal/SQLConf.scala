@@ -776,8 +776,7 @@ object SQLConf {
 
   val AUTO_UPDATE_SIZE =
     buildConf("spark.sql.statistics.autoUpdate.size")
-      .doc("Enables automatic update for table size once table's data is changed. " +
-      "Note that this update also removes other statistics (e.g. row count and column statistics)")
+      .doc("Enables automatic update for table size once table's data is changed.")
       .booleanConf
       .createWithDefault(false)
 

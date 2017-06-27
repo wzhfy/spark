@@ -32,21 +32,18 @@ import org.apache.spark.sql.internal.SessionState
 
 object CommandUtils extends Logging {
 
-  /**
-   * Update statistics (currently only sizeInBytes) after changing data by commands.
-   */
-  def updateTableStats(
-      sparkSession: SparkSession,
-      table: CatalogTable,
-      newTableSize: Option[BigInt] = None,
-      newRowCount: Option[BigInt] = None): Unit = {
-    if (sparkSession.sessionState.conf.autoUpdateSize && table.stats.nonEmpty) {
+  /** Update statistics after changing data by commands. */
+  def updateTableStats(sparkSession: SparkSession, table: CatalogTable): Unit = {
+    if (table.stats.nonEmpty) {
       val catalog = sparkSession.sessionState.catalog
-      val newTable = catalog.getTableMetadata(table.identifier)
-      val newSize = newTableSize.getOrElse(
-        CommandUtils.calculateTotalSize(sparkSession.sessionState, newTable))
-      catalog.alterTableStats(table.identifier,
-        CatalogStatistics(sizeInBytes = newSize, rowCount = newRowCount))
+      if (sparkSession.sessionState.conf.autoUpdateSize) {
+        val newTable = catalog.getTableMetadata(table.identifier)
+        val newSize = CommandUtils.calculateTotalSize(sparkSession.sessionState, newTable)
+        val newStats = CatalogStatistics(sizeInBytes = newSize)
+        catalog.alterTableStats(table.identifier, Some(newStats))
+      } else {
+        catalog.alterTableStats(table.identifier, None)
+      }
     }
   }
 

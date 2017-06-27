@@ -66,7 +66,7 @@ case class AnalyzeTableCommand(
     // Update the metastore if the above statistics of the table are different from those
     // recorded in the metastore.
     if (newStats.isDefined) {
-      sessionState.catalog.alterTableStats(tableIdentWithDB, newStats.get)
+      sessionState.catalog.alterTableStats(tableIdentWithDB, newStats)
       // Refresh the cached data source table in the catalog.
       sessionState.catalog.refreshTable(tableIdentWithDB)
     }
