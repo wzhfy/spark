@@ -42,17 +42,29 @@ case class AnalyzeColumnCommand(
     if (tableMeta.tableType == CatalogTableType.VIEW) {
       throw new AnalysisException("ANALYZE TABLE is not supported on views.")
     }
+<<<<<<< HEAD
     val sizeInBytes = CommandUtils.calculateTotalSize(sessionState, tableMeta)
+=======
+    val oldRowCount = tableMeta.stats.flatMap(_.rowCount.map(_.toLong)).getOrElse(-1L)
+    val oldColStats = tableMeta.stats.map(_.colStats).getOrElse(Map.empty)
+    val newSize = AnalyzeTableCommand.calculateTotalSize(sessionState, tableMeta)
+>>>>>>> analyze empty table
 
     // Compute stats for each column
-    val (rowCount, newColStats) = computeColumnStats(sparkSession, tableIdentWithDB, columnNames)
+    val (newRowCount, colStats) = computeColumnStats(sparkSession, tableIdentWithDB, columnNames)
+
+    val newColStats = if (newRowCount == oldRowCount) {
+      // Since currently we only support append data, equal row count means unchanged data. We can
+      // combine previous column stats and the latest column stats.
+      oldColStats ++ colStats
+    } else {
+      // If the data is changed, only keep the latest column stats.
+      colStats
+    }
 
     // We also update table-level stats in order to keep them consistent with column-level stats.
     val statistics = CatalogStatistics(
-      sizeInBytes = sizeInBytes,
-      rowCount = Some(rowCount),
-      // Newly computed column stats should override the existing ones.
-      colStats = tableMeta.stats.map(_.colStats).getOrElse(Map.empty) ++ newColStats)
+      sizeInBytes = newSize, rowCount = Some(newRowCount), colStats = newColStats)
 
     sessionState.catalog.alterTableStats(tableIdentWithDB, Some(statistics))
 

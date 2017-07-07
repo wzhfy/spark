@@ -25,7 +25,12 @@ import scala.util.matching.Regex
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.TableIdentifier
+<<<<<<< HEAD
 import org.apache.spark.sql.catalyst.catalog.{CatalogRelation, CatalogStatistics}
+=======
+import org.apache.spark.sql.catalyst.catalog.{CatalogRelation, CatalogStatistics, CatalogTable}
+import org.apache.spark.sql.catalyst.plans.logical.ColumnStat
+>>>>>>> analyze empty table
 import org.apache.spark.sql.catalyst.util.StringUtils
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.LogicalRelation
@@ -136,6 +141,7 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
     }
   }
 
+<<<<<<< HEAD
   test("SPARK-21079 - analyze partitioned table with only a subset of partitions visible") {
     val sourceTableName = "analyzeTable_part"
     val tableName = "analyzeTable_part_vis"
@@ -178,6 +184,20 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
           sql(s"ANALYZE TABLE $tableName COMPUTE STATISTICS noscan")
           assert(getCatalogStatistics(tableName).sizeInBytes === BigInt(5812))
         }
+=======
+  private def checkTableStats(
+      tableName: String,
+      hasSizeInBytes: Boolean,
+      expectedRowCounts: Option[Int]): Option[CatalogStatistics] = {
+    val stats = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tableName)).stats
+
+    if (hasSizeInBytes || expectedRowCounts.nonEmpty) {
+      assert(stats.isDefined)
+      assert(stats.get.sizeInBytes >= 0)
+      assert(stats.get.rowCount === expectedRowCounts)
+    } else {
+      assert(stats.isEmpty)
+>>>>>>> analyze empty table
     }
   }
 
@@ -210,10 +230,15 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
     }
   }
 
-  test("test elimination of the influences of the old stats") {
+  test("update/eliminate table-level stats") {
     val textTable = "textTable"
     withTable(textTable) {
       sql(s"CREATE TABLE $textTable (key STRING, value STRING) STORED AS TEXTFILE")
+      sql(s"ANALYZE TABLE $textTable COMPUTE STATISTICS noscan")
+      checkTableStats(textTable, hasSizeInBytes = true, expectedRowCounts = None)
+      sql(s"ANALYZE TABLE $textTable COMPUTE STATISTICS")
+      checkTableStats(textTable, hasSizeInBytes = true, expectedRowCounts = Some(0))
+
       sql(s"INSERT INTO TABLE $textTable SELECT * FROM src")
       sql(s"ANALYZE TABLE $textTable COMPUTE STATISTICS")
       val fetchedStats1 =
@@ -231,6 +256,48 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
       val fetchedStats3 =
         checkTableStats(textTable, hasSizeInBytes = true, expectedRowCounts = None)
       assert(fetchedStats3.get.sizeInBytes > fetchedStats2.get.sizeInBytes)
+    }
+  }
+
+  test("update/eliminate column-level stats") {
+    val table = "update_col_stats_table"
+    withTable(table) {
+      sql(s"CREATE TABLE $table (c1 INT, c2 STRING, c3 DOUBLE)")
+      sql(s"ANALYZE TABLE $table COMPUTE STATISTICS FOR COLUMNS c1")
+      val fetchedStats0 =
+        checkTableStats(table, hasSizeInBytes = true, expectedRowCounts = Some(0)).get
+      assert(fetchedStats0.colStats == Map("c1" -> ColumnStat(0, None, None, 0, 4, 4)))
+
+      // Analyze the same column: replace with the latest column stats.
+      sql(s"INSERT INTO TABLE $table SELECT 1, 'a', 10.0")
+      sql(s"ANALYZE TABLE $table COMPUTE STATISTICS FOR COLUMNS c1")
+      val fetchedStats1 =
+        checkTableStats(table, hasSizeInBytes = true, expectedRowCounts = Some(1)).get
+      assert(fetchedStats1.colStats == Map(
+        "c1" -> ColumnStat(distinctCount = 1, min = Some(1), max = Some(1), nullCount = 0,
+          avgLen = 4, maxLen = 4)))
+
+      // Analyze another column: since the size of table is not changed, the precious column
+      // stats are kept.
+      sql(s"ANALYZE TABLE $table COMPUTE STATISTICS FOR COLUMNS c2")
+      val fetchedStats2 =
+        checkTableStats(table, hasSizeInBytes = true, expectedRowCounts = Some(1)).get
+      assert(fetchedStats2.colStats == Map(
+        "c1" -> ColumnStat(distinctCount = 1, min = Some(1), max = Some(1), nullCount = 0,
+          avgLen = 4, maxLen = 4),
+        "c2" -> ColumnStat(distinctCount = 1, min = None, max = None, nullCount = 0,
+          avgLen = 1, maxLen = 1)))
+
+      // Add new data and then analyze: remove stale column stats and add generated column stats.
+      sql(s"INSERT INTO TABLE $table SELECT 2, 'b', 20.0")
+      sql(s"ANALYZE TABLE $table COMPUTE STATISTICS FOR COLUMNS c1, c3")
+      val fetchedStats3 =
+        checkTableStats(table, hasSizeInBytes = true, expectedRowCounts = Some(2)).get
+      assert(fetchedStats3.colStats == Map(
+        "c1" -> ColumnStat(distinctCount = 2, min = Some(1), max = Some(2), nullCount = 0,
+          avgLen = 4, maxLen = 4),
+        "c3" -> ColumnStat(distinctCount = 2, min = Some(10.0), max = Some(20.0), nullCount = 0,
+          avgLen = 8, maxLen = 8)))
     }
   }
 
