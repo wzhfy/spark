@@ -25,12 +25,8 @@ import scala.util.matching.Regex
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.TableIdentifier
-<<<<<<< HEAD
 import org.apache.spark.sql.catalyst.catalog.{CatalogRelation, CatalogStatistics}
-=======
-import org.apache.spark.sql.catalyst.catalog.{CatalogRelation, CatalogStatistics, CatalogTable}
 import org.apache.spark.sql.catalyst.plans.logical.ColumnStat
->>>>>>> analyze empty table
 import org.apache.spark.sql.catalyst.util.StringUtils
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.LogicalRelation
@@ -141,7 +137,6 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
     }
   }
 
-<<<<<<< HEAD
   test("SPARK-21079 - analyze partitioned table with only a subset of partitions visible") {
     val sourceTableName = "analyzeTable_part"
     val tableName = "analyzeTable_part_vis"
@@ -184,20 +179,6 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
           sql(s"ANALYZE TABLE $tableName COMPUTE STATISTICS noscan")
           assert(getCatalogStatistics(tableName).sizeInBytes === BigInt(5812))
         }
-=======
-  private def checkTableStats(
-      tableName: String,
-      hasSizeInBytes: Boolean,
-      expectedRowCounts: Option[Int]): Option[CatalogStatistics] = {
-    val stats = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tableName)).stats
-
-    if (hasSizeInBytes || expectedRowCounts.nonEmpty) {
-      assert(stats.isDefined)
-      assert(stats.get.sizeInBytes >= 0)
-      assert(stats.get.rowCount === expectedRowCounts)
-    } else {
-      assert(stats.isEmpty)
->>>>>>> analyze empty table
     }
   }
 
@@ -230,10 +211,12 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
     }
   }
 
-  test("update/eliminate table-level stats") {
+  test("keep row count in stats with noscan if table is not changed") {
     val textTable = "textTable"
     withTable(textTable) {
       sql(s"CREATE TABLE $textTable (key STRING, value STRING) STORED AS TEXTFILE")
+
+      // analyze table when it's empty
       sql(s"ANALYZE TABLE $textTable COMPUTE STATISTICS noscan")
       checkTableStats(textTable, hasSizeInBytes = true, expectedRowCounts = None)
       sql(s"ANALYZE TABLE $textTable COMPUTE STATISTICS")
@@ -245,21 +228,14 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
         checkTableStats(textTable, hasSizeInBytes = true, expectedRowCounts = Some(500))
 
       sql(s"ANALYZE TABLE $textTable COMPUTE STATISTICS noscan")
-      // when the total size is not changed, the old row count is kept
+      // when the table is not changed, total size is the same, and the old row count is kept
       val fetchedStats2 =
         checkTableStats(textTable, hasSizeInBytes = true, expectedRowCounts = Some(500))
       assert(fetchedStats1 == fetchedStats2)
-
-      sql(s"INSERT INTO TABLE $textTable SELECT * FROM src")
-      sql(s"ANALYZE TABLE $textTable COMPUTE STATISTICS noscan")
-      // update total size and remove the old and invalid row count
-      val fetchedStats3 =
-        checkTableStats(textTable, hasSizeInBytes = true, expectedRowCounts = None)
-      assert(fetchedStats3.get.sizeInBytes > fetchedStats2.get.sizeInBytes)
     }
   }
 
-  test("update/eliminate column-level stats") {
+  test("re-analyze column-level stats") {
     val table = "update_col_stats_table"
     withTable(table) {
       sql(s"CREATE TABLE $table (c1 INT, c2 STRING, c3 DOUBLE)")

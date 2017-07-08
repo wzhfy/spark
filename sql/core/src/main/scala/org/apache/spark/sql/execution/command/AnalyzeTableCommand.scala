@@ -20,7 +20,6 @@ package org.apache.spark.sql.execution.command
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.{CatalogStatistics, CatalogTableType}
-import org.apache.spark.sql.execution.SQLExecution
 
 
 /**
@@ -38,11 +37,25 @@ case class AnalyzeTableCommand(
     if (tableMeta.tableType == CatalogTableType.VIEW) {
       throw new AnalysisException("ANALYZE TABLE is not supported on views.")
     }
-    val newTotalSize = CommandUtils.calculateTotalSize(sessionState, tableMeta)
 
     val oldTotalSize = tableMeta.stats.map(_.sizeInBytes.toLong).getOrElse(-1L)
     val oldRowCount = tableMeta.stats.flatMap(_.rowCount.map(_.toLong)).getOrElse(-1L)
-    var newStats: Option[CatalogStatistics] = None
+
+    // Because we will invalidate or update stats when table is changed, if table stats exist,
+    // they should be correct, we can safely use them.
+    val newStats: Option[CatalogStatistics] = if (oldTotalSize < 0) {
+      // no stats before
+      val newTotalSize = CommandUtils.calculateTotalSize(sessionState, tableMeta)
+      if (noscan) {
+        Some(CatalogStatistics(sizeInBytes = newTotalSize))
+      } else {
+        val newRowCount = sparkSession.table(tableIdentWithDB).count()
+        Some(CatalogStatistics(sizeInBytes = newTotalSize, rowCount = Some(BigInt(newRowCount))))
+      }
+    } else {
+
+    }
+
     if (newTotalSize >= 0 && newTotalSize != oldTotalSize) {
       newStats = Some(CatalogStatistics(sizeInBytes = newTotalSize))
     }
