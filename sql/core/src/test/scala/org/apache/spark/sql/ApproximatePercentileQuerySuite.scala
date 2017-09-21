@@ -17,8 +17,11 @@
 
 package org.apache.spark.sql
 
+import java.sql.{Date, Timestamp}
+
 import org.apache.spark.sql.catalyst.expressions.aggregate.ApproximatePercentile.DEFAULT_PERCENTILE_ACCURACY
 import org.apache.spark.sql.catalyst.expressions.aggregate.ApproximatePercentile.PercentileDigest
+import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.test.SharedSQLContext
 
 /**
@@ -63,6 +66,29 @@ class ApproximatePercentileQuerySuite extends QueryTest with SharedSQLContext {
              |FROM $table
            """.stripMargin),
         Row(Seq(250D, 500D, 750D), 1000, Seq(1D, 1000D), 500500)
+      )
+    }
+  }
+
+  test("percentile_approx, numeric/date/timestamp column types") {
+    withTempView(table) {
+      val intSeq = 1 to 1000
+      val data: Seq[(java.math.BigDecimal, Date, Timestamp)] = intSeq.map { i =>
+        (new java.math.BigDecimal(i), DateTimeUtils.toJavaDate(i), DateTimeUtils.toJavaTimestamp(i))
+      }
+      data.toDF("cdecimal", "cdate", "ctimestamp").createOrReplaceTempView(table)
+      checkAnswer(
+        spark.sql(
+          s"""SELECT
+             |  percentile_approx(cdecimal, array(0.25, 0.5, 0.75D)),
+             |  percentile_approx(cdate, array(0.25, 0.5, 0.75D)),
+             |  percentile_approx(ctimestamp, array(0.25, 0.5, 0.75D))
+             |FROM $table
+           """.stripMargin),
+        Row(
+          Seq(250D, 500D, 750D),
+          Seq(250D, 500D, 750D).map(d => DateTimeUtils.toJavaDate(d.toInt)),
+          Seq(250D, 500D, 750D).map(d => DateTimeUtils.toJavaTimestamp(d.toLong)))
       )
     }
   }
