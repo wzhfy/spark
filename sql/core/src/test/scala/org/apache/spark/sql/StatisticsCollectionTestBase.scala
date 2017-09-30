@@ -25,7 +25,7 @@ import scala.util.Random
 
 import org.apache.spark.sql.catalyst.{QualifiedTableName, TableIdentifier}
 import org.apache.spark.sql.catalyst.catalog.{CatalogStatistics, CatalogTable, HiveTableRelation}
-import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, EquiHeightBucket, EquiHeightHistogram, LogicalPlan}
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.internal.StaticSQLConf
@@ -46,6 +46,10 @@ abstract class StatisticsCollectionTestBase extends QueryTest with SQLTestUtils 
   private val d2 = Date.valueOf("2016-05-09")
   private val t1 = Timestamp.valueOf("2016-05-08 00:00:01")
   private val t2 = Timestamp.valueOf("2016-05-09 00:00:02")
+  private val d1Internal = DateTimeUtils.fromJavaDate(d1)
+  private val d2Internal = DateTimeUtils.fromJavaDate(d2)
+  private val t1Internal = DateTimeUtils.fromJavaTimestamp(t1)
+  private val t2Internal = DateTimeUtils.fromJavaTimestamp(t2)
 
   /**
    * Define a very simple 3 row table used for testing column serialization.
@@ -61,22 +65,34 @@ abstract class StatisticsCollectionTestBase extends QueryTest with SQLTestUtils 
     (null, null, null, null, null, null, null, null, null, null, null, null, null)
   )
 
-  /** A mapping from column to the stats collected. */
+  /**
+   * A mapping from column to the stats collected.
+   * (The number of buckets in equi-height histogram is 2.)
+   */
   protected val stats = mutable.LinkedHashMap(
     "cbool" -> ColumnStat(2, Some(false), Some(true), 1, 1, 1),
-    "cbyte" -> ColumnStat(2, Some(1.toByte), Some(2.toByte), 1, 1, 1),
-    "cshort" -> ColumnStat(2, Some(1.toShort), Some(3.toShort), 1, 2, 2),
-    "cint" -> ColumnStat(2, Some(1), Some(4), 1, 4, 4),
-    "clong" -> ColumnStat(2, Some(1L), Some(5L), 1, 8, 8),
-    "cdouble" -> ColumnStat(2, Some(1.0), Some(6.0), 1, 8, 8),
-    "cfloat" -> ColumnStat(2, Some(1.0f), Some(7.0f), 1, 4, 4),
-    "cdecimal" -> ColumnStat(2, Some(Decimal(dec1)), Some(Decimal(dec2)), 1, 16, 16),
+    "cbyte" -> ColumnStat(2, Some(1.toByte), Some(2.toByte), 1, 1, 1,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(1, 1, 1) :: EquiHeightBucket(1, 2, 1) :: Nil))),
+    "cshort" -> ColumnStat(2, Some(1.toShort), Some(3.toShort), 1, 2, 2,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(1, 1, 1) :: EquiHeightBucket(1, 3, 1) :: Nil))),
+    "cint" -> ColumnStat(2, Some(1), Some(4), 1, 4, 4,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(1, 1, 1) :: EquiHeightBucket(1, 4, 1) :: Nil))),
+    "clong" -> ColumnStat(2, Some(1L), Some(5L), 1, 8, 8,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(1, 1, 1) :: EquiHeightBucket(1, 5, 1) :: Nil))),
+    "cdouble" -> ColumnStat(2, Some(1.0), Some(6.0), 1, 8, 8,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(1, 1, 1) :: EquiHeightBucket(1, 6, 1) :: Nil))),
+    "cfloat" -> ColumnStat(2, Some(1.0f), Some(7.0f), 1, 4, 4,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(1, 1, 1) :: EquiHeightBucket(1, 7, 1) :: Nil))),
+    "cdecimal" -> ColumnStat(2, Some(Decimal(dec1)), Some(Decimal(dec2)), 1, 16, 16,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(1, 1, 1) :: EquiHeightBucket(1, 8, 1) :: Nil))),
     "cstring" -> ColumnStat(2, None, None, 1, 3, 3),
     "cbinary" -> ColumnStat(2, None, None, 1, 3, 3),
-    "cdate" -> ColumnStat(2, Some(DateTimeUtils.fromJavaDate(d1)),
-      Some(DateTimeUtils.fromJavaDate(d2)), 1, 4, 4),
-    "ctimestamp" -> ColumnStat(2, Some(DateTimeUtils.fromJavaTimestamp(t1)),
-      Some(DateTimeUtils.fromJavaTimestamp(t2)), 1, 8, 8)
+    "cdate" -> ColumnStat(2, Some(d1Internal), Some(d2Internal), 1, 4, 4,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(d1Internal, d1Internal, 1) ::
+        EquiHeightBucket(d1Internal, d2Internal, 1) :: Nil))),
+    "ctimestamp" -> ColumnStat(2, Some(t1Internal), Some(t2Internal), 1, 8, 8,
+      Some(EquiHeightHistogram(1, EquiHeightBucket(t1Internal, t1Internal, 1) ::
+        EquiHeightBucket(t1Internal, t2Internal, 1) :: Nil)))
   )
 
   private val randomName = new Random(31)

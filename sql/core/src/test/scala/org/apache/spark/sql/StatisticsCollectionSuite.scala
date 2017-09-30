@@ -154,7 +154,10 @@ class StatisticsCollectionSuite extends StatisticsCollectionTestBase with Shared
     // (data.head.productArity - 1) because the last column does not support stats collection.
     assert(stats.size == data.head.productArity - 1)
     val df = data.toDF(stats.keys.toSeq :+ "carray" : _*)
-    checkColStats(df, stats)
+    withSQLConf(SQLConf.HISTOGRAM_ENABLED.key -> "true", SQLConf.HISTOGRAM_BUCKETS_NUM.key -> "2") {
+      val stats2 = mutable.LinkedHashMap[String, ColumnStat]("cbyte" -> stats("cbyte"))
+      checkColStats(df, stats2)
+    }
   }
 
   test("column stats collection for null columns") {

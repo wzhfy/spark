@@ -222,8 +222,8 @@ object ColumnStat extends Logging {
     if (idx <= 0) {
       throw new AnalysisException("Failed to parse histogram.")
     }
-    val height = BigDecimal(s.substring(0, idx))
-    val pattern = "Bucket\\(([\\d.]+), ([\\d.]+), (\\d+)\\)".r
+    val height = s.substring(0, idx).toDouble
+    val pattern = "Bucket\\(([^,]+), ([^,]+), ([^\\)]+)\\)".r
     val buckets = pattern.findAllMatchIn(s).map { m =>
       EquiHeightBucket(m.group(1).toDouble, m.group(2).toDouble, m.group(3).toLong)
     }.toSeq
@@ -252,7 +252,7 @@ trait Histogram {
  * @param height number of rows in each bucket
  * @param ehBuckets equi-height histogram buckets
  */
-case class EquiHeightHistogram(height: BigDecimal, ehBuckets: Seq[EquiHeightBucket])
+case class EquiHeightHistogram(height: Double, ehBuckets: Seq[EquiHeightBucket])
     extends Histogram with Logging {
   override def toExternalString: String = {
     def bucketString(bucket: EquiHeightBucket): String = {

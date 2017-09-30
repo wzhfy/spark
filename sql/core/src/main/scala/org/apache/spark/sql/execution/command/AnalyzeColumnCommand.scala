@@ -116,6 +116,9 @@ case class AnalyzeColumnCommand(
    * as a result should stay in sync with it.
    */
   private def statExprs(col: Attribute, conf: SQLConf): CreateNamedStruct = {
+    def struct(exprs: Expression*): CreateNamedStruct = CreateStruct(exprs.map { expr =>
+      expr.transformUp { case af: AggregateFunction => af.toAggregateExpression() }
+    })
     val one = Literal(1, LongType)
 
     // the approximate ndv (num distinct value) should never be larger than the number of rows
@@ -139,7 +142,7 @@ case class AnalyzeColumnCommand(
         val percentiles = (1 until conf.histogramBucketsNum)
             .map(i => i.toDouble / conf.histogramBucketsNum)
         struct(fixedLenTypeExprs(castType) :+ new ApproximatePercentile(col,
-          Literal(percentiles), Literal(conf.percentileAccuracy)): _*)
+          Literal(percentiles.toArray), Literal(conf.percentileAccuracy)): _*)
       } else {
         struct(fixedLenTypeExprs(castType) :+ nullArray: _*)
       }
@@ -216,9 +219,11 @@ case class AnalyzeColumnCommand(
 
     if (intervalNdvExprs.nonEmpty) {
       // Get bucket ndvs in the second scan.
-      val expr = struct(intervalNdvExprs: _*)
-      val namedExpr = Alias(expr, expr.toString)()
-      val ndvsRow = new QueryExecution(sparkSession, Aggregate(Nil, Seq(namedExpr), relation))
+      val namedExprs = intervalNdvExprs.map { aggFunc =>
+        val expr = aggFunc.toAggregateExpression()
+        Alias(expr, expr.toString)()
+      }
+      val ndvsRow = new QueryExecution(sparkSession, Aggregate(Nil, namedExprs, relation))
         .executedPlan.executeTake(1).head
 
       intervalNdvExprs.zipWithIndex.foreach { case (agg, i) =>
@@ -242,7 +247,4 @@ case class AnalyzeColumnCommand(
     columnStats.toMap
   }
 
-  private def struct(exprs: Expression*): CreateNamedStruct = CreateStruct(exprs.map { expr =>
-    expr.transformUp { case af: AggregateFunction => af.toAggregateExpression() }
-  })
 }
