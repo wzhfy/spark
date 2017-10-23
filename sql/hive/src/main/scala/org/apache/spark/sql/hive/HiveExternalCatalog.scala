@@ -1032,7 +1032,21 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
       schema.fields.map(f => (f.name, f.dataType)).toMap
     stats.colStats.foreach { case (colName, colStat) =>
       colStat.toMap(colName, colNameTypeMap(colName)).foreach { case (k, v) =>
-        statsProperties += (columnStatKeyPropName(colName, k) -> v)
+        if (k == ColumnStat.KEY_HISTOGRAM) {
+          // In Hive metastore, the length of value in table properties cannot be larger than 4000,
+          // so we need to split histogram into multiple key-value properties if it's too long.
+          val maxValueLen = 4000
+          val baseName = columnStatKeyPropName(colName, k)
+          var i = 0
+          for (begin <- 0 until v.length by maxValueLen) {
+            val end = math.min(v.length, begin + maxValueLen)
+            statsProperties +=
+              (baseName + ColumnStat.KEY_HISTOGRAM_SEPARATOR + i -> v.substring(begin, end))
+            i += 1
+          }
+        } else {
+          statsProperties += (columnStatKeyPropName(colName, k) -> v)
+        }
       }
     }
 
@@ -1050,6 +1064,16 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
     } else {
 
       val colStats = new mutable.HashMap[String, ColumnStat]
+      val sortedStatsProps = statsProps.toSeq.sortBy { case (k, v) =>
+        val items = k.split(ColumnStat.KEY_HISTOGRAM_SEPARATOR)
+        if (items.length == 2) {
+          // Histogram may have multiple properties, so they need to be sorted by name and number.
+          (items(0), items(1).toInt)
+        } else {
+          // For other stats properties, only sort by name.
+          (k, 0)
+        }
+      }
 
       // For each column, recover its column stats. Note that this is currently a O(n^2) operation,
       // but given the number of columns it usually not enormous, this is probably OK as a start.
@@ -1059,11 +1083,21 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
         if (statsProps.contains(columnStatKeyPropName(field.name, ColumnStat.KEY_VERSION))) {
           // If "version" field is defined, then the column stat is defined.
           val keyPrefix = columnStatKeyPropName(field.name, "")
-          val colStatMap = statsProps.filterKeys(_.startsWith(keyPrefix)).map { case (k, v) =>
-            (k.drop(keyPrefix.length), v)
+          val colStatMap = new mutable.HashMap[String, String]
+          val histogramKeyPrefix = keyPrefix + ColumnStat.KEY_HISTOGRAM
+          var histogramValue = ""
+          sortedStatsProps.foreach { case (k, v) =>
+            if (k.startsWith(histogramKeyPrefix)) {
+              // Need to concatenate histogram string if it has multiple entries.
+              histogramValue += v
+            } else if (k.startsWith(keyPrefix)) {
+              colStatMap += (k.drop(keyPrefix.length) -> v)
+            }
           }
-
-          ColumnStat.fromMap(table, field, colStatMap).foreach {
+          if (histogramValue.nonEmpty) {
+            colStatMap += ColumnStat.KEY_HISTOGRAM -> histogramValue
+          }
+          ColumnStat.fromMap(table, field, colStatMap.toMap).foreach {
             colStat => colStats += field.name -> colStat
           }
         }
