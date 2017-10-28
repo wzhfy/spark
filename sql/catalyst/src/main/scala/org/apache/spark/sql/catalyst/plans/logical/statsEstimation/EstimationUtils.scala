@@ -17,10 +17,11 @@
 
 package org.apache.spark.sql.catalyst.plans.logical.statsEstimation
 
+import scala.collection.mutable.ArrayBuffer
 import scala.math.BigDecimal.RoundingMode
 
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap}
-import org.apache.spark.sql.catalyst.plans.logical.{ColumnStat, LogicalPlan, Statistics}
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.types.{DecimalType, _}
 
 
@@ -114,4 +115,165 @@ object EstimationUtils {
     }
   }
 
+  def getOverlappedRanges(
+      leftHistogram: EquiHeightHistogram,
+      rightHistogram: EquiHeightHistogram,
+      newMin: Double,
+      newMax: Double): Seq[OverlappedRange] = {
+    val overlappedRanges = new ArrayBuffer[OverlappedRange]()
+    // Only buckets whose range intersect [newMin, newMax] have join possibility.
+    val leftBuckets = leftHistogram.ehBuckets
+      .filter(b => b.lo <= newMax && b.hi >= newMin).toArray
+    val rightBuckets = rightHistogram.ehBuckets
+      .filter(b => b.lo <= newMax && b.hi >= newMin).toArray
+
+    leftBuckets.foreach { lb =>
+      rightBuckets.foreach { rb =>
+        val (left, leftHeight) = trimBucket(lb, leftHistogram.height, newMin, newMax)
+        val (right, rightHeight) = trimBucket(rb, rightHistogram.height, newMin, newMax)
+        // Only collect overlapped ranges.
+        if (left.lo <= right.hi && left.hi >= right.lo) {
+          // Collect overlapping ranges.
+          val range = if (left.lo == left.hi) {
+            // Case1: the left bucket has only one value
+            OverlappedRange(
+              lo = left.lo,
+              hi = left.lo,
+              minNdv = 1,
+              maxNdv = 1,
+              leftNumRows = leftHeight,
+              rightNumRows = rightHeight / right.ndv
+            )
+          } else if (right.lo == right.hi) {
+            // Case2: the right bucket has only one value
+            OverlappedRange(
+              lo = right.lo,
+              hi = right.lo,
+              minNdv = 1,
+              maxNdv = 1,
+              leftNumRows = leftHeight / left.ndv,
+              rightNumRows = rightHeight
+            )
+          } else if (right.lo >= left.lo && right.hi >= left.hi) {
+            // Case3: the left bucket is "smaller" than the right bucket
+            //      left.lo            right.lo     left.hi          right.hi
+            // --------+------------------+------------+----------------+------->
+            val leftRatio = (left.hi - right.lo) / (left.hi - left.lo)
+            val rightRatio = (left.hi - right.lo) / (right.hi - right.lo)
+            if (leftRatio == 0) {
+              // The overlapping range has only one value.
+              OverlappedRange(
+                lo = right.lo,
+                hi = right.lo,
+                minNdv = 1,
+                maxNdv = 1,
+                leftNumRows = leftHeight / left.ndv,
+                rightNumRows = rightHeight / right.ndv
+              )
+            } else {
+              OverlappedRange(
+                lo = right.lo,
+                hi = left.hi,
+                minNdv = math.min(left.ndv * leftRatio, right.ndv * rightRatio),
+                maxNdv = math.max(left.ndv * leftRatio, right.ndv * rightRatio),
+                leftNumRows = leftHeight * leftRatio,
+                rightNumRows = rightHeight * rightRatio
+              )
+            }
+          } else if (right.lo <= left.lo && right.hi <= left.hi) {
+            // Case4: the left bucket is "larger" than the right bucket
+            //      right.lo           left.lo      right.hi         left.hi
+            // --------+------------------+------------+----------------+------->
+            val leftRatio = (right.hi - left.lo) / (left.hi - left.lo)
+            val rightRatio = (right.hi - left.lo) / (right.hi - right.lo)
+            if (leftRatio == 0) {
+              // The overlapping range has only one value.
+              OverlappedRange(
+                lo = right.hi,
+                hi = right.hi,
+                minNdv = 1,
+                maxNdv = 1,
+                leftNumRows = leftHeight / left.ndv,
+                rightNumRows = rightHeight / right.ndv
+              )
+            } else {
+              OverlappedRange(
+                lo = left.lo,
+                hi = right.hi,
+                minNdv = math.min(left.ndv * leftRatio, right.ndv * rightRatio),
+                maxNdv = math.max(left.ndv * leftRatio, right.ndv * rightRatio),
+                leftNumRows = leftHeight * leftRatio,
+                rightNumRows = rightHeight * rightRatio
+              )
+            }
+          } else if (right.lo >= left.lo && right.hi <= left.hi) {
+            // Case5: the left bucket contains the right bucket
+            //      left.lo            right.lo     right.hi         left.hi
+            // --------+------------------+------------+----------------+------->
+            val leftRatio = (right.hi - right.lo) / (left.hi - left.lo)
+            OverlappedRange(
+              lo = right.lo,
+              hi = right.hi,
+              minNdv = math.min(left.ndv * leftRatio, right.ndv),
+              maxNdv = math.max(left.ndv * leftRatio, right.ndv),
+              leftNumRows = leftHeight * leftRatio,
+              rightNumRows = rightHeight
+            )
+          } else {
+            assert(right.lo <= left.lo && right.hi >= left.hi)
+            // Case6: the right bucket contains the left bucket
+            //      right.lo           left.lo      left.hi          right.hi
+            // --------+------------------+------------+----------------+------->
+            val rightRatio = (left.hi - left.lo) / (right.hi - right.lo)
+            OverlappedRange(
+              lo = left.lo,
+              hi = left.hi,
+              minNdv = math.min(left.ndv, right.ndv * rightRatio),
+              maxNdv = math.max(left.ndv, right.ndv * rightRatio),
+              leftNumRows = leftHeight,
+              rightNumRows = rightHeight * rightRatio
+            )
+          }
+          overlappedRanges += range
+        }
+      }
+    }
+    overlappedRanges
+  }
+
+  def trimBucket(bucket: EquiHeightBucket, height: Double, min: Double, max: Double)
+    : (EquiHeightBucket, Double) = {
+    val (lo, hi) = if (bucket.lo <= min && bucket.hi >= max) {
+      //      bucket.lo            min          max         bucket.hi
+      // --------+------------------+------------+-------------+------->
+      (min, max)
+    } else if (bucket.lo <= min && bucket.hi >= min) {
+      //      bucket.lo            min       bucket.hi
+      // --------+------------------+-----------+------->
+      (min, bucket.hi)
+    } else if (bucket.lo <= max && bucket.hi >= max) {
+      //      bucket.lo            max       bucket.hi
+      // --------+------------------+-----------+------->
+      (bucket.lo, max)
+    } else {
+      (bucket.lo, bucket.hi)
+    }
+
+    if (bucket.hi == bucket.lo) {
+      (bucket, height)
+    } else if (hi == lo) {
+      (EquiHeightBucket(lo, hi, 1), height / bucket.ndv)
+    } else {
+      val ratio = (hi - lo) / (bucket.hi - bucket.lo)
+      (EquiHeightBucket(lo, hi, math.ceil(bucket.ndv * ratio).toLong), height * ratio)
+    }
+  }
+
+  case class OverlappedRange(
+      lo: Double,
+      hi: Double,
+      minNdv: Double,
+      maxNdv: Double,
+      leftNumRows: Double,
+      rightNumRows: Double)
 }
