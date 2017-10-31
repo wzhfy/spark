@@ -1028,20 +1028,21 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
       statsProperties += STATISTICS_NUM_ROWS -> stats.rowCount.get.toString()
     }
 
+    // In Hive metastore, the length of value in table properties cannot be larger than 4000.
+    // We need to split the key-value pair into multiple key-value pairs if the length of
+    // value exceeds this threshold.
+    val threshold = conf.get(SCHEMA_STRING_LENGTH_THRESHOLD)
+
     val colNameTypeMap: Map[String, DataType] =
       schema.fields.map(f => (f.name, f.dataType)).toMap
     stats.colStats.foreach { case (colName, colStat) =>
       colStat.toMap(colName, colNameTypeMap(colName)).foreach { case (k, v) =>
-        if (k == ColumnStat.KEY_HISTOGRAM) {
-          // In Hive metastore, the length of value in table properties cannot be larger than 4000,
-          // so we need to split histogram into multiple key-value properties if it's too long.
-          val maxValueLen = 4000
+        if (v.length > threshold) {
           val baseName = columnStatKeyPropName(colName, k)
           var i = 0
-          for (begin <- 0 until v.length by maxValueLen) {
-            val end = math.min(v.length, begin + maxValueLen)
-            statsProperties +=
-              (baseName + ColumnStat.KEY_HISTOGRAM_SEPARATOR + i -> v.substring(begin, end))
+          for (begin <- 0 until v.length by threshold) {
+            val end = math.min(v.length, begin + threshold)
+            statsProperties += (baseName + KEY_INDEX_SEPARATOR + i -> v.substring(begin, end))
             i += 1
           }
         } else {
@@ -1065,7 +1066,7 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
 
       val colStats = new mutable.HashMap[String, ColumnStat]
       val sortedStatsProps = statsProps.toSeq.sortBy { case (k, v) =>
-        val items = k.split(ColumnStat.KEY_HISTOGRAM_SEPARATOR)
+        val items = k.split(KEY_INDEX_SEPARATOR)
         if (items.length == 2) {
           // Histogram may have multiple properties, so they need to be sorted by name and number.
           (items(0), items(1).toInt)
@@ -1324,6 +1325,9 @@ object HiveExternalCatalog {
   val STATISTICS_TOTAL_SIZE = STATISTICS_PREFIX + "totalSize"
   val STATISTICS_NUM_ROWS = STATISTICS_PREFIX + "numRows"
   val STATISTICS_COL_STATS_PREFIX = STATISTICS_PREFIX + "colStats."
+
+  // Separator for key name and its index if the property is split into multiple key-value pairs.
+  val KEY_INDEX_SEPARATOR = "-"
 
   val TABLE_PARTITION_PROVIDER = SPARK_SQL_PREFIX + "partitionProvider"
   val TABLE_PARTITION_PROVIDER_CATALOG = "catalog"
