@@ -497,7 +497,7 @@ class SQLAppStatusListenerSuite extends SparkFunSuite with SharedSQLContext with
     }
 
     // Wait until the new execution is started and being tracked.
-    while (statusStore.executionsCount() < oldCount) {
+    while (statusStore.executionsCount() <= oldCount) {
       Thread.sleep(100)
     }
 
